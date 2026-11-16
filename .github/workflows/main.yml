@@ -1,8 +1,13 @@
 # .github/workflows/your-workflow-name.yml
 
-name: AiNiee Beta Build.
+name: AiNieePlus Windows x64 Installer
 on:
   workflow_dispatch:
+    inputs:
+      include_macos:
+        description: Also build macOS packages
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -12,6 +17,7 @@ permissions:
 
 jobs:
   build:
+    name: Windows x86-64 installer and portable
     runs-on: windows-latest
 
     steps:
@@ -29,6 +35,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: 3.12
+          architecture: x64
 
       - name: Cache bundled FFmpeg
         id: ffmpeg-cache
@@ -61,16 +68,57 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --upgrade setuptools
-          python -m pip install -r requirements-frontend.txt -r requirements-backend.txt "pyinstaller>=6.21.0"
+          python -m pip install -r requirements-frontend.txt -r requirements-backend.txt "pyinstaller>=6.21.0" pytest
           python -m pip install --no-deps -r requirements_no_deps.txt
           python -m pip cache purge
 
       - name: Set up Rust updater toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Prepare offline manga models and fonts
+        run: python -m Tools.prepare_manga_models --download
+
+      - name: Verify manga workflows and editor
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest tests/test_manga.py tests/test_manga_api.py tests/test_manga_editor.py -q
+
       - name: Build EXE with PyInstaller (--onedir mode)
         # 将原 Build EXE 步骤重命名，更清晰
         run: python .\Tools\pyinstall.py
+
+      - name: Build x64 Windows installer
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE dist/AiNiee/LICENSE
+          New-Item -ItemType Directory -Path dist/AiNiee/docs -Force | Out-Null
+          Copy-Item docs/manga.md dist/AiNiee/docs/manga.md
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $compiler)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup installation failed" }
+          }
+          $sourceRoot = (Resolve-Path dist/AiNiee).Path
+          $outputRoot = Join-Path $PWD 'dist/installer'
+          & $compiler "/DSourceRoot=$sourceRoot" "/DOutputRoot=$outputRoot" Tools/Packaging/windows/AiNieePlus.iss
+          if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed" }
+
+      - name: Verify installed x64 package
+        shell: pwsh
+        run: |
+          $setup = (Resolve-Path dist/installer/AiNieePlus-Windows-x64-Setup.exe).Path
+          $installDir = Join-Path $env:RUNNER_TEMP 'AiNieePlus Installed Test'
+          $result = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$installDir`"") -WindowStyle Hidden -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Installer test failed: $($result.ExitCode)" }
+          python -m Tools.verify_windows_release "$installDir"
+          if ($LASTEXITCODE -ne 0) { throw "Installed package verification failed" }
+
+      - name: Upload Windows x64 installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AiNieePlus-Windows-x64-Setup
+          path: dist/installer/AiNieePlus-Windows-x64-Setup.exe
+          if-no-files-found: error
 
       - name: Prepare Release Package
         run: |
@@ -85,6 +133,7 @@ jobs:
           path: AiNiee-Beta-Windows-Portable.zip
 
   build-macos:
+    if: github.event_name == 'workflow_dispatch' && inputs.include_macos
     name: Build macOS (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -137,6 +186,9 @@ jobs:
           python -m pip install --no-deps -r requirements_no_deps.txt
           python -m pip cache purge
 
+      - name: Prepare offline manga models and fonts
+        run: python -m Tools.prepare_manga_models --download
+
       - name: Import signing certificate
         if: env.MACOS_CERTIFICATE_P12 != ''
         run: |
@@ -165,13 +217,14 @@ jobs:
           path: dist/AiNiee-Beta-macOS-${{ matrix.arch }}.dmg
 
   release:
-    name: Publish Beta Release
+    name: Publish tested release assets
+    if: always() && needs.build.result == 'success' && (needs.build-macos.result == 'success' || needs.build-macos.result == 'skipped')
     needs:
       - build
       - build-macos
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.AINIEE }}
+      GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout repository
@@ -183,29 +236,21 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Recreate Beta release
+      - name: Publish versioned prerelease
         run: |
           set -euo pipefail
 
           shopt -s nullglob
           assets=(release-assets/*)
           if [ ${#assets[@]} -eq 0 ]; then
-            echo "No release assets downloaded; refusing to recreate Beta release"; exit 1
+            echo "No release assets downloaded"; exit 1
           fi
 
-          # 同 tag 的正式 release 和 draft 都先清掉，避免 action 命中重复 draft 后发布失败。
-          gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --jq '.[] | select(.tag_name == "Beta") | .id' |
-          while read -r release_id; do
-            if [[ -n "$release_id" ]]; then
-              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}"
-            fi
-          done
-
-          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/Beta" >/dev/null 2>&1 || true
-
-          gh release create Beta "${assets[@]}" \
-            --title "AiNiee-Beta 开发测试版本，由最新源码自动打包" \
-            --notes "AiNiee-Beta 开发测试版本，由最新源码自动打包" \
+          tag="manga-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}"
+          sha256sum "${assets[@]}" > release-assets/SHA256SUMS.txt
+          gh release create "$tag" "${assets[@]}" release-assets/SHA256SUMS.txt \
+            --title "AiNieePlus 漫画翻译 · Windows x64 · ${GITHUB_SHA:0:7}" \
+            --notes "包含本地漫画识别、编辑排版、完整离线核心模型及 Windows x86-64 安装程序。" \
             --generate-notes \
             --prerelease \
             --target "$GITHUB_SHA"

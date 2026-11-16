@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "font_sha256": "68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5",
+  "font_source": "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
+  "models": [
+    {
+      "id": "manga-panel",
+      "source": "https://github.com/xulihang/balloon-dataset",
+      "url": "https://github.com/xulihang/balloon-dataset/releases/download/models/manga-panel.zip",
+      "license": "AGPL-3.0"
+    },
+    {
+      "id": "mangaocr",
+      "source": "https://github.com/xulihang/mangaocr-onnx",
+      "url": "https://github.com/xulihang/mangaocr-onnx/releases/download/models/",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "rapidocr",
+      "source": "https://github.com/RapidAI/RapidOCR",
+      "url": "",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "lama",
+      "source": "https://huggingface.co/mayocream/lama-manga-onnx",
+      "url": "https://huggingface.co/mayocream/lama-manga-onnx/resolve/main/lama-manga.onnx",
+      "license": "Apache-2.0"
+    }
+  ]
+}

@@ -32,6 +32,7 @@ from Frontend.pages.providers.platform_page import PlatformPage
 from Frontend.pages.providers.transcription_page import TranscriptionPage
 from Frontend.pages.providers.image_generation_page import ImageGenerationPage
 from Frontend.pages.media.workspace_page import ImageTranslationPage, AudioTranslationPage, VideoTranslationPage
+from Frontend.pages.media.manga_page import MangaPage
 from Frontend.pages.logs.log_view_page import LogViewPage
 from Frontend.pages.settings.app_settings_page import AppSettingsPage
 from Frontend.pages.settings.audio_translation_settings_page import AudioTranslationSettingsPage
@@ -383,9 +384,11 @@ class AppFluentWindow(FluentWindow, ConfigMixin, LogMixin, ToastMixin, Base):
         self.edit_view_page = EditViewPage("edit_view_page", self, cache_manager, file_reader)
         self.addSubInterface(self.edit_view_page, FluentIcon.DOCUMENT, self.tra("文本翻译"), NavigationItemPosition.SCROLL)
         self.image_translation_page = ImageTranslationPage(parent=self)
+        self.manga_translation_page = MangaPage(parent=self)
         self.audio_translation_page = AudioTranslationPage(parent=self)
         self.video_translation_page = VideoTranslationPage(parent=self)
-        self.media_pages = (self.image_translation_page, self.audio_translation_page, self.video_translation_page)
+        self.media_pages = (self.image_translation_page, self.manga_translation_page, self.audio_translation_page, self.video_translation_page)
+        self.addSubInterface(self.manga_translation_page, FluentIcon.EDIT, self.tra("漫画翻译"), NavigationItemPosition.SCROLL)
         self.addSubInterface(self.image_translation_page, FluentIcon.PHOTO, self.tra("图片翻译"), NavigationItemPosition.SCROLL)
         self.addSubInterface(self.audio_translation_page, FluentIcon.MUSIC, self.tra("音频翻译"), NavigationItemPosition.SCROLL)
         self.addSubInterface(self.video_translation_page, FluentIcon.VIDEO, self.tra("视频翻译"), NavigationItemPosition.SCROLL)

@@ -6,6 +6,8 @@ import time
 
 
 def _run_splash(receiver, ready):
+    from Frontend.platform.qt_runtime import configure_qt_plugins
+    configure_qt_plugins()
     # Qt widgets stay on this process's main thread, keeping the loading window
     # responsive while the desktop connects to the backend and builds its UI.
     from PyQt5.QtCore import Qt, QTimer

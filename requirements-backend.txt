@@ -27,6 +27,7 @@ pandas>=3.0.3
 rich>=15.0.0
 tqdm>=4.69.0
 jaconv>=0.5.0
+rapidocr==3.10.0
 python-rapidjson>=1.23
 protobuf==4.25.7
 # 获取iso语言代码对应的友好名称
@@ -44,7 +45,7 @@ sounddevice>=0.4.4
 
 # BabelDOC
 # PDF layout processing still requires OpenCV; image translation uses cloud generation.
-opencv-python>=4.10
+opencv-python>=4.10,<5
 # BabelDOC's spawned PDF writer imports the glossary module during startup.
 hyperscan>=0.7.13
 configargparse>=1.7
@@ -52,7 +53,7 @@ httpx[socks]>=0.27.0
 huggingface-hub>=0.27.0
 numpy>=2.0.2
 onnx==1.21.0
-onnxruntime==1.20.1
+onnxruntime>=1.24,<2
 openai>=1.59.3
 orjson>=3.10.14
 charset-normalizer>=2.0.0

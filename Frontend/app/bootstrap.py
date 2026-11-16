@@ -148,6 +148,8 @@ def main(argv=None):
 
 
 def _run_application(args, script_dir, splash):
+    from Frontend.platform.qt_runtime import configure_qt_plugins
+    configure_qt_plugins()
     import atexit
     from Frontend.app.backend_connection import connect_backend
     from Frontend.core.config import ConfigMixin

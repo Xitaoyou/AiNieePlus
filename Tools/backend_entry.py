@@ -16,6 +16,11 @@ if __name__ == "__main__":
             sys.exit(1)
         if sys.stdout is not None:
             print(json.dumps(result))
+    elif sys.argv[1:] == ["--check-manga-runtime"]:
+        import json
+        from Backend.core.paths import backend_resource_path
+        from Backend.infrastructure.manga.runtime_check import check_runtime
+        print(json.dumps(check_runtime(backend_resource_path("manga"))))
     elif sys.argv[1:] == ["--check-pdf-runtime"]:
         from importlib.metadata import version
 

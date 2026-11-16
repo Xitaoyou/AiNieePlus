@@ -574,6 +574,8 @@ class Runtime(ConfigStore):
             self.closing = True
         if self._scheduler is not None:
             self._scheduler.close()
+        if getattr(self, "manga", None):
+            self.manga.close()
         if not self._started:
             return
         try:

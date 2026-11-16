@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "files": {
+    "lama": {
+      "model.onnx": "4512adab295ee5a5e02ccd1bdf8d45dccbac88309d9cff1532ffd5de876f02a4"
+    },
+    "manga-panel": {
+      "model.onnx": "4e355bcdb761a004795984cee1a46cbb677fc6fe1005990ebcf58afa00343920",
+      "model.json": "8ba432d80023ffdf7be3caf7cc31a8d726a55ec42968863876d2315896c3febc"
+    },
+    "mangaocr": {
+      "encoder.onnx": "5766730bc8e894d8f61f8671f59eabe59afe9d614c05d1fcd52b306f15458459",
+      "decoder.onnx": "a9ba33fdf9020b25e227a7b97abab8a5be16872745888eb49b017507efd4b2b5",
+      "vocab.txt": "5cb5c5586d98a2f331d9f8828e4586479b0611bfba5d8c3b6dadffc84d6a36a3"
+    },
+    "rapidocr": {
+      "det.onnx": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
+      "rec.onnx": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
+      "cls.onnx": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c"
+    }
+  },
+  "font_sha256": "68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5"
+}

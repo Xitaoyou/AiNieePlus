@@ -24,7 +24,7 @@ def pyinstaller_command(arch=None):
         "--copy-metadata=pymupdf",
         "--copy-metadata=mcp", "--copy-metadata=mcp-types",
     ]
-    for package in ("babeldoc", "mediapipe", "chardet", "sklearn", "rich", "magika"):
+    for package in ("babeldoc", "mediapipe", "chardet", "sklearn", "rich", "magika", "rapidocr", "onnxruntime"):
         command.append(f"--collect-all={package}")
     for package in ("Frontend", "PyQt5", "PyQt6", "PySide2", "PySide6", "tkinter",
                     "IPython", "pytest", "jax", "jaxlib", "torch", "tensorflow", "skimage"):
@@ -37,6 +37,8 @@ def pyinstaller_command(arch=None):
 
 
 def build_backend(destination, arch=None):
+    from Tools.prepare_manga_models import check
+    check()
     from Tools.ffmpeg_bundle import pyinstaller_media_args
     subprocess.run([sys.executable, "-m", "PyInstaller", *pyinstaller_command(arch),
                     *pyinstaller_media_args(arch)], cwd=ROOT, check=True)
@@ -51,7 +53,7 @@ def check_release(destination):
     executable = (destination / "Contents" / "MacOS" / "AiNieeBackend" if sys.platform == "darwin"
                   else destination / "AiNieeBackend.exe")
     with TemporaryDirectory(prefix="ainiee release check ") as working:
-        for check in ("--check-media-tools", "--check-pdf-runtime"):
+        for check in ("--check-media-tools", "--check-pdf-runtime", "--check-manga-runtime"):
             subprocess.run([str(executable.resolve()), check], cwd=working,
                            env={**os.environ, "PATH": ""}, check=True, timeout=120,
                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)

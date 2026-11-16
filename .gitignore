@@ -27,3 +27,9 @@ PluginScripts/IOPlugins/*
 .DS_Store
 bilingual_auto/
 downloads/
+/Backend/resources/manga/models/*/
+/Backend/resources/manga/fonts/*.otf
+/Backend/resources/manga/fonts/*.ttf
+/.pytest_cache/
+/pytest-cache-files-*/
+/manga-models/

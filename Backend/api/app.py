@@ -253,6 +253,8 @@ def create_app(runtime=None, token=None):
     app.include_router(create_image_generation_router(runtime, authorized))
     from Backend.api.media import create_media_router
     app.include_router(create_media_router(runtime, authorized))
+    from Backend.api.manga import create_manga_router
+    app.include_router(create_manga_router(runtime, authorized))
     from Backend.api.tasks import create_task_router
     app.include_router(create_task_router(runtime, authorized))
     from Backend.api.media_operations import create_media_operation_router

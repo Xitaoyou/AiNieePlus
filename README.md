@@ -14,6 +14,8 @@
 
 ## 软件介绍🧾 
 
+AiNieePlus 漫画翻译工作区：本地检测与 OCR、可编辑文字框、去字排版和译文回填。使用与开发说明见 [漫画翻译](docs/manga.md)。
+
   
 <div align="center">
 <strong>AiNiee</strong> 是一款专注于 AI 多模态翻译的工具，<br>一键自动翻译游戏、书籍、文档、字幕，以及漫画图片、播客音频与视频内容。
