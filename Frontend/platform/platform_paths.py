@@ -3,7 +3,7 @@ import platform
 from Frontend.core.paths import MACOS_APP_NAME
 
 
-UPSTREAM_RELEASE_API_URL = "https://api.github.com/repos/NEKOparapa/AiNiee/releases/latest"
+UPSTREAM_RELEASE_API_URL = "https://api.github.com/repos/Xitaoyou/AiNieePlus/releases"
 MACOS_RELEASE_API_URL = UPSTREAM_RELEASE_API_URL
 
 

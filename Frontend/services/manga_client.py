@@ -12,7 +12,7 @@ class MangaClient:
         if not self.verified and path != "/capabilities":
             try:
                 info = self.backend.request("GET", "/api/v2/manga/capabilities")
-                if info.get("editor_version", 0) < 3:
+                if info.get("editor_version", 0) < 4:
                     raise RuntimeError("unsupported editor")
             except Exception as error:
                 raise RuntimeError(

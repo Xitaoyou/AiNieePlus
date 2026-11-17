@@ -79,6 +79,29 @@ class MangaService:
         if context.is_cancelled():
             raise PipelineError("CANCELLED", "漫画任务已取消", 409)
 
+    def sync_punctuation(self, workspace_id):
+        provider = getattr(self, "punctuation_provider", None)
+        if provider is None:
+            return self.store.load(workspace_id)
+        state = provider()
+        with self.store.lock:
+            document = self.store.load(workspace_id)
+            if (
+                document.settings.punctuation_rules == state["rows"]
+                and document.settings.punctuation_enabled == state["enabled"]
+            ):
+                return document
+            revision = document.revision
+            document.settings.punctuation_rules = state["rows"]
+            document.settings.punctuation_enabled = state["enabled"]
+            document.settings.default_style.auto_punctuation = state["enabled"]
+            for page in document.pages:
+                if page.default_style:
+                    page.default_style.auto_punctuation = state["enabled"]
+                for region in page.regions:
+                    region.style.auto_punctuation = state["enabled"]
+            return self.store.save(document, revision)
+
     def run(
         self,
         workspace_id,
@@ -90,6 +113,7 @@ class MangaService:
         options=None,
     ):
         context, options = context or ExecutionContext(), options or {}
+        self.sync_punctuation(workspace_id)
         stages = {
             "recognize": ["detect", "ocr"],
             "pipeline": ["translate", "render"],
@@ -244,6 +268,10 @@ class MangaService:
                                 layout_rect=rect.model_copy(),
                                 confidence=detected["score"],
                                 removal=document.settings.removal,
+                                style=(
+                                    page.default_style
+                                    or document.settings.default_style
+                                ).model_copy(deep=True),
                             )
                             candidates = [
                                 p
@@ -362,6 +390,7 @@ class MangaService:
                             report,
                             context,
                             erase_untranslated=False,
+                            background_only=operation == "clean",
                         )
                     page.stages[operation] = {
                         "status": "complete",
@@ -599,7 +628,14 @@ class MangaService:
         return translation_report
 
     def render(
-        self, document, page, revision, report, context=None, erase_untranslated=False
+        self,
+        document,
+        page,
+        revision,
+        report,
+        context=None,
+        erase_untranslated=False,
+        background_only=False,
     ):
         page_data = page.model_copy(deep=True)
         for region in page_data.regions:
@@ -617,6 +653,8 @@ class MangaService:
                 "directory": str(self.store.directory(document.id)),
                 "bundled": str(getattr(self.models, "bundled", "")),
                 "erase_untranslated": erase_untranslated,
+                "background_only": background_only,
+                "punctuation_rules": document.settings.punctuation_rules,
             },
         )
         report["warnings"].extend(warnings)
@@ -651,7 +689,7 @@ class MangaService:
         return {"files": [str(p) for p in published]}
 
     def _export_into(self, workspace_id, output_dir, mode="png", context=None):
-        document = self.store.load(workspace_id)
+        document = self.sync_punctuation(workspace_id)
         output = Path(output_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
         if mode in {"i18next", "i18next-source", "i18next-target"}:

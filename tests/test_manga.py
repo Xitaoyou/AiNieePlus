@@ -240,8 +240,12 @@ def test_model_hash_detects_corruption(tmp_path):
         registry.verify("legacy-balloon-yolov4")
 
 
+@pytest.mark.parametrize(
+    ("reply_text", "expected"),
+    [("你好，世界！", "你好，世界！"), ("你好．．．", "你好...")],
+)
 def test_original_translation_pipeline_with_controlled_llm_reply(
-    workspace, monkeypatch
+    workspace, monkeypatch, reply_text, expected
 ):
     """Keep AiNiee batching/prompts/checks; replace only the outbound model reply."""
     from Backend.domain.config.task_config import TaskConfig
@@ -262,6 +266,9 @@ def test_original_translation_pipeline_with_controlled_llm_reply(
         "active": "LocalLLM_manga_test",
         "translate": "LocalLLM_manga_test",
     }
+    from Backend.application.manga_punctuation import update_rules
+
+    update_rules(snapshot, True)
     snapshot["language_filter_switch"] = False
     snapshot["code_filter_switch"] = False
     monkeypatch.setattr(
@@ -271,7 +278,7 @@ def test_original_translation_pipeline_with_controlled_llm_reply(
 
     def reply(self, messages, system_prompt, platform_config):
         seen.append((messages, platform_config["target_platform"]))
-        return False, "", "<textarea>1.你好，世界！</textarea>", 12, 6
+        return False, "", "<textarea>1." + reply_text + "</textarea>", 12, 6
 
     monkeypatch.setattr(LLMRequester, "sent_request", reply)
     store, doc = workspace
@@ -284,7 +291,7 @@ def test_original_translation_pipeline_with_controlled_llm_reply(
         result["report"], ensure_ascii=True
     )
     assert seen and seen[0][1] == "LocalLLM_manga_test"
-    assert result["workspace"]["pages"][0]["regions"][0]["target"] == "你好，世界！"
+    assert result["workspace"]["pages"][0]["regions"][0]["target"] == expected
 
 
 def test_export_preserves_untranslated_original(workspace, tmp_path):
@@ -466,3 +473,69 @@ def test_background_cache_survives_typography_changes(workspace):
     assert store.background_key(page, doc.settings) == key
     page.regions[0].erase_rect.x = 15
     assert store.background_key(page, doc.settings) != key
+
+
+def test_mixed_directory_imports_pdf_pages_without_touching_originals(tmp_path):
+    import hashlib
+
+    import fitz
+
+    folder = tmp_path / "mixed"
+    folder.mkdir()
+    pdf = fitz.open()
+    for i in range(2):
+        page = pdf.new_page(width=100, height=150)
+        page.insert_text((10, 30), f"Page {i + 1}")
+    pdf.save(folder / "book.pdf")
+    pdf.close()
+    Image.new("RGB", (90, 120), "white").save(folder / "cover.png")
+    before = hashlib.sha256((folder / "book.pdf").read_bytes()).hexdigest()
+    store = MangaStore(tmp_path / "projects")
+    doc = store.import_images([str(folder)], {"auto_recognize": False})
+    assert len(doc.pages) == 3
+    assert doc.pages[0].name == "book-0001.png"
+    assert (doc.pages[0].width, doc.pages[0].height) == (200, 300)
+    assert doc.pages[1].name == "book-0002.png"
+    assert hashlib.sha256((folder / "book.pdf").read_bytes()).hexdigest() == before
+    assert all(store.asset(doc.id, p.id, "source").is_file() for p in doc.pages)
+
+
+def test_detected_frames_inherit_project_defaults(workspace):
+    store, doc = workspace
+    doc.settings.default_style.size = 42
+    doc.settings.default_style.bold = True
+    doc.settings.default_style.autofit = False
+    for page in doc.pages:
+        page.regions = []
+    doc = store.save(doc, doc.revision)
+    result = StubService(store, StubModels()).run(doc.id, "detect")
+    assert not result["report"]["errors"]
+    assert all(
+        p["regions"][0]["style"]["size"] == 42 and p["regions"][0]["style"]["bold"]
+        for p in result["workspace"]["pages"]
+    )
+
+
+def test_background_editing_does_not_bake_translated_layers(workspace, monkeypatch):
+    from Backend.infrastructure.manga import render
+
+    store, doc = workspace
+    page = doc.pages[0]
+    directory = store.directory(doc.id)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("background editing must not lay out final text")
+
+    monkeypatch.setattr(render, "lettering", forbidden)
+    render.materialize(
+        page,
+        store.asset(doc.id, page.id, "source"),
+        directory,
+        "final-key",
+        StubModels(),
+        background_key="bg-key",
+        background_only=True,
+    )
+    assert (directory / f"{page.id}.bg-key.clean.png").exists()
+    assert not (directory / f"{page.id}.final-key.render.png").exists()
+    assert not (directory / f"{page.id}.final-key.layer.png").exists()

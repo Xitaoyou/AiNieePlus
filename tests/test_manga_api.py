@@ -1,11 +1,14 @@
-from types import SimpleNamespace
 import threading
+from copy import deepcopy
+from types import SimpleNamespace
+
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from PIL import Image
-from Backend.api.manga import create_manga_router
+
 from Backend.api.jobs import create_job_router
+from Backend.api.manga import create_manga_router
 from Backend.application.job_scheduler import JobScheduler
 from Backend.application.manga_service import MangaService
 from Backend.application.manga_store import MangaStore
@@ -28,6 +31,14 @@ def test_authenticated_api_queue_revision_and_assets(tmp_path):
     runtime = SimpleNamespace(
         scheduler=scheduler, run_job=submit, pipeline_progress=lambda p: None
     )
+    config = {"post_translation_tables": []}
+    runtime.load_config = lambda: deepcopy(config)
+
+    def update_config(updater):
+        updater(config)
+        return deepcopy(config)
+
+    runtime.update_config = update_config
     service = MangaService(store=MangaStore(tmp_path / "projects"))
 
     def auth(authorization: str | None = Header(default=None)):
@@ -48,6 +59,23 @@ def test_authenticated_api_queue_revision_and_assets(tmp_path):
         with TestClient(app) as client:
             assert client.get("/api/v2/manga/models").status_code == 401
             client.headers["Authorization"] = "Bearer test"
+            state = client.get("/api/v2/manga/punctuation").json()
+            assert not state["enabled"] and any(
+                r["src"] == "．．．" for r in state["rows"]
+            )
+            enabled = client.post("/api/v2/manga/punctuation", json={"enabled": True})
+            assert enabled.status_code == 200 and enabled.json()["enabled"]
+            assert len(config["post_translation_tables"]) == 1
+            assert (
+                client.post(
+                    "/api/v2/manga/punctuation",
+                    json={
+                        "enabled": True,
+                        "rows": [{"src": "[", "dst": "x", "regex": True}],
+                    },
+                ).status_code
+                == 422
+            )
             source = tmp_path / "page.png"
             Image.new("RGB", (100, 100), "white").save(source)
             result = client.post(
@@ -102,7 +130,7 @@ def test_authenticated_api_queue_revision_and_assets(tmp_path):
             )
             assert invalid.status_code == 422
             assert (
-                client.get("/api/v2/manga/capabilities").json()["editor_version"] == 3
+                client.get("/api/v2/manga/capabilities").json()["editor_version"] == 4
             )
             assert client.delete("/api/v2/manga/" + doc["id"]).status_code == 200
             assert client.get("/api/v2/manga/" + doc["id"]).status_code == 404

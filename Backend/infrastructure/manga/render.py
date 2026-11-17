@@ -175,7 +175,7 @@ def clean_page(source, page, models):
     return Image.fromarray(result), Image.fromarray(mask)
 
 
-def lettering(page, canvas_size):
+def lettering(page, canvas_size, punctuation_rules=None):
     from Shared.manga_lettering import render_text
 
     layer = Image.new("RGBA", canvas_size)
@@ -184,8 +184,18 @@ def lettering(page, canvas_size):
         if not region.target:
             continue
         tile, info = render_text(
-            region.model_dump(), font_path=resolve_font(region.style.font)
+            region.model_dump(),
+            font_path=resolve_font(region.style.font),
+            punctuation_rules=punctuation_rules,
         )
+        if info.get("invalid_rules"):
+            warnings.append(
+                {
+                    "region_id": region.id,
+                    "code": "INVALID_REPLACEMENT_RULE",
+                    "message": "公共替换表存在无效正则，已跳过，请修正规则",
+                }
+            )
         if info["overflow"] or info["below_minimum"]:
             warnings.append(
                 {
@@ -209,7 +219,16 @@ def render_page(source, page, models):
     return {"clean": clean, "mask": mask, "layer": layer, "render": composite}, warnings
 
 
-def materialize(page, source_path, directory, revision, models, background_key=None):
+def materialize(
+    page,
+    source_path,
+    directory,
+    revision,
+    models,
+    background_key=None,
+    background_only=False,
+    punctuation_rules=None,
+):
     """Runs only in the spawned model worker, including LaMa and Pillow fonts."""
     import hashlib
     import json
@@ -258,7 +277,12 @@ def materialize(page, source_path, directory, revision, models, background_key=N
             clean, mask = clean_page(image, page, models)
             write(clean, cached)
             write(mask, cached_mask)
-        layer, warnings = lettering(page, image.size)
+        if background_only:
+            output_key = background_key or revision
+            write(clean, directory / f"{page.id}.{output_key}.clean.png")
+            write(mask, directory / f"{page.id}.{output_key}.mask.png")
+            return []
+        layer, warnings = lettering(page, image.size, punctuation_rules)
         rendered = Image.alpha_composite(clean.convert("RGBA"), layer).convert("RGB")
         for name, result in {
             "render": rendered,

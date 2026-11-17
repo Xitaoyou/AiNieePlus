@@ -2,6 +2,7 @@
 
 import math
 import os
+import re
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -30,7 +31,41 @@ def font_at(path, size):
     return ImageFont.truetype(path, size) if path else ImageFont.load_default(size=size)
 
 
-def render_text(region, width=None, height=None, font_path=None):
+DEFAULT_PUNCTUATION_RULES = [
+    {"src": source, "dst": target, "regex": False}
+    for source, target in [
+        ("．．．", "..."),
+        ("︙", "..."),
+        ("⋮", "..."),
+        ("…", "..."),
+        ("‥", ".."),
+        ("︱", "—"),
+        ("︲", "—"),
+        ("｜", "—"),
+        ("│", "—"),
+    ]
+]
+
+
+def normalize_punctuation(text, rules=None, errors=None):
+    for rule in DEFAULT_PUNCTUATION_RULES if rules is None else rules:
+        source, target = rule.get("src", ""), rule.get("dst", "")
+        if source:
+            try:
+                text = (
+                    re.sub(source, target, text)
+                    if rule.get("regex")
+                    else text.replace(source, target)
+                )
+            except (re.error, IndexError, TypeError) as error:
+                if errors is not None:
+                    errors.append(str(error))
+    return text
+
+
+def render_text(
+    region, width=None, height=None, font_path=None, punctuation_rules=None
+):
     rect, style = region["layout_rect"], region["style"]
     width = max(1, round(width if width is not None else rect["width"]))
     height = max(1, round(height if height is not None else rect["height"]))
@@ -38,7 +73,10 @@ def render_text(region, width=None, height=None, font_path=None):
     available_w, available_h = max(1, width - 2 * padding), max(1, height - 2 * padding)
     path = font_path or style.get("font") or default_font()
     stroke = style["stroke_width"] + int(style["bold"])
-    text = region.get("target", "")
+    text = region.get("target", "").strip()
+    invalid_rules = []
+    if style.get("auto_punctuation"):
+        text = normalize_punctuation(text, punctuation_rules, invalid_rules)
     spacing = style["char_spacing"]
     vertical = style["vertical"]
     font_missing = False
@@ -50,16 +88,23 @@ def render_text(region, width=None, height=None, font_path=None):
         except OSError:
             path, font_missing = default_font(), True
             font = font_at(path, size)
-        boxes = {
-            c: font.getbbox(c, stroke_width=stroke) for c in set(text) if c != "\n"
-        }
+        tokens = lambda paragraph: (
+            re.findall(r"\.{3}|.", paragraph)
+            if vertical and style.get("auto_punctuation")
+            else list(paragraph)
+        )
+        glyphs = {c for paragraph in text.split("\n") for c in tokens(paragraph)}
+        boxes = {c: font.getbbox(c, stroke_width=stroke) for c in glyphs}
         cell_w = max([size] + [b[2] - b[0] for b in boxes.values()])
         cell_h = max([size] + [b[3] - b[1] for b in boxes.values()])
         advances = {c: max(1, font.getlength(c) + spacing) for c in boxes}
         lines = []
         limit = max(1, int(available_h // max(1, cell_h + spacing)))
         for paragraph in text.split("\n"):
+            if not paragraph.strip():
+                continue
             if vertical:
+                paragraph = tokens(paragraph.strip())
                 lines.extend(
                     [paragraph[i : i + limit] for i in range(0, len(paragraph), limit)]
                     or [""]
@@ -107,7 +152,7 @@ def render_text(region, width=None, height=None, font_path=None):
 
     size = style["size"]
     if style["autofit"]:
-        low, high, best = 1, size, 1
+        low, high, best = 1, 512, 1
         while low <= high:
             candidate = (low + high) // 2
             *_, tw, th = arrange(candidate)
@@ -134,14 +179,38 @@ def render_text(region, width=None, height=None, font_path=None):
             x = logical_w - cw - column * pitch
             for i, char in enumerate(line):
                 box = boxes[char]
-                draw.text(
-                    (
-                        x - box[0] + (cw - (box[2] - box[0])) / 2,
-                        i * max(1, ch + spacing) - box[1],
-                    ),
-                    char,
-                    **common,
-                )
+                if style.get("auto_punctuation") and char in {
+                    "...",
+                    "—",
+                    "―",
+                    "ー",
+                    "─",
+                    "-",
+                }:
+                    glyph = Image.new(
+                        "RGBA", (max(1, box[2] - box[0]), max(1, box[3] - box[1]))
+                    )
+                    ImageDraw.Draw(glyph).text((-box[0], -box[1]), char, **common)
+                    glyph = glyph.rotate(90, expand=True)
+                    glyph.thumbnail(
+                        (max(1, round(cw)), max(1, round(ch))), Image.Resampling.LANCZOS
+                    )
+                    content.alpha_composite(
+                        glyph,
+                        (
+                            round(x + (cw - glyph.width) / 2),
+                            round(i * max(1, ch + spacing) + (ch - glyph.height) / 2),
+                        ),
+                    )
+                else:
+                    draw.text(
+                        (
+                            x - box[0] + (cw - (box[2] - box[0])) / 2,
+                            i * max(1, ch + spacing) - box[1],
+                        ),
+                        char,
+                        **common,
+                    )
         else:
             length = (
                 sum(advances[c] for c in line) - spacing + 2 * stroke if line else 0
@@ -174,6 +243,7 @@ def render_text(region, width=None, height=None, font_path=None):
         content, ((width - content.width) // 2, (height - content.height) // 2)
     )
     return tile, {
+        "invalid_rules": invalid_rules,
         "font_missing": font_missing,
         "font_size": size,
         "overflow": overflow and not style["autofit"],

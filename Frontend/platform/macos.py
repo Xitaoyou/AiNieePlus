@@ -4,7 +4,7 @@ from Frontend.core.paths import MACOS_APP_NAME
 from Frontend.core.config import ConfigMixin
 
 
-MACOS_PROJECT_URL = "https://github.com/NEKOparapa/AiNiee"
+MACOS_PROJECT_URL = "https://github.com/Xitaoyou/AiNieePlus"
 
 
 def command_shortcut(key: str) -> str:

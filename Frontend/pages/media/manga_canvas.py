@@ -38,13 +38,24 @@ class RegionItem(QGraphicsRectItem):
                 self.rect().width(),
                 self.rect().height(),
                 self.region["target"],
-                json.dumps(self.region["style"], sort_keys=True),
+                json.dumps(
+                    [self.region["style"], self.canvas.punctuation_rules],
+                    sort_keys=True,
+                ),
                 self.region["layout_rect"].get("rotation", 0),
             )
             if getattr(self, "text_key", None) != key:
-                tile, self.layout_info = render_text(self.region, key[0], key[1])
+                tile, self.layout_info = render_text(
+                    self.region,
+                    key[0],
+                    key[1],
+                    punctuation_rules=self.canvas.punctuation_rules,
+                )
+                self.canvas.layoutMeasured.emit(self.region["id"], self.layout_info)
                 self.setToolTip(
-                    "字体文件不可用，预览使用内置字体，请重新选择字体"
+                    "公共替换规则存在无效正则，已跳过，请在文本替换表修正"
+                    if self.layout_info.get("invalid_rules")
+                    else "字体文件不可用，预览使用内置字体，请重新选择字体"
                     if self.layout_info.get("font_missing")
                     else "拖动移动译文；右下角缩放并自动适应文字；右键更多操作"
                 )
@@ -127,6 +138,8 @@ class MangaCanvas(QGraphicsView):
     deleteRequested = pyqtSignal()
     contextRequested = pyqtSignal(str, object)
     modeRequested = pyqtSignal(int)
+    zoomChanged = pyqtSignal(float)
+    layoutMeasured = pyqtSignal(str, dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -145,6 +158,8 @@ class MangaCanvas(QGraphicsView):
         self.pan_origin = None
         self.box_preview = None
         self.live_layout = False
+        self.punctuation_rules = None
+        self.editable = True
         self.persisted_lines = []
 
     def apply_theme(self, *_):
@@ -164,14 +179,20 @@ class MangaCanvas(QGraphicsView):
             self.box_preview = None
             self.lines = []
             self.persisted_lines = []
+            self.display_data = None
         self.display_page = page["id"]
         from PyQt5 import sip
 
-        if not getattr(self, "pixmap_item", None) or sip.isdeleted(self.pixmap_item):
+        new_pixmap = not getattr(self, "pixmap_item", None) or sip.isdeleted(
+            self.pixmap_item
+        )
+        if new_pixmap:
             self.pixmap_item = self.scene().addPixmap(QPixmap())
-        pixmap = QPixmap()
-        pixmap.loadFromData(data)
-        self.pixmap_item.setPixmap(pixmap)
+        if new_pixmap or getattr(self, "display_data", None) is not data:
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            self.pixmap_item.setPixmap(pixmap)
+            self.display_data = data
         self.setSceneRect(0, 0, page["width"], page["height"])
         existing = {
             i.region["id"]: i for i in self.scene().items() if isinstance(i, RegionItem)
@@ -193,6 +214,8 @@ class MangaCanvas(QGraphicsView):
                 item.setFlag(
                     QGraphicsItem.ItemIsMovable, not region.get("geometry_locked")
                 )
+            item.setVisible(self.editable)
+            item.setEnabled(self.editable)
             item.update()
             item.setSelected(
                 region["id"] in (selected if isinstance(selected, list) else [selected])
@@ -239,10 +262,13 @@ class MangaCanvas(QGraphicsView):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         if 0.02 < self.transform().m11() * factor < 30:
             self.scale(factor, factor)
+            self.zoomChanged.emit(self.transform().m11())
 
     def contextMenuEvent(self, event):
-        item = self.itemAt(event.pos())
-        if isinstance(item, RegionItem):
+        item = next(
+            (i for i in self.items(event.pos()) if isinstance(i, RegionItem)), None
+        )
+        if item is not None:
             if not item.isSelected():
                 self.scene().clearSelection()
                 item.setSelected(True)

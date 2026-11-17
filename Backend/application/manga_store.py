@@ -14,7 +14,7 @@ from PIL import Image, ImageOps
 from Backend.application.pipeline_common import PipelineError
 from Backend.domain.models.manga import MangaPage, MangaSettings, MangaWorkspace
 
-EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".pdf"}
 
 
 def atomic_json(path, data):
@@ -148,7 +148,8 @@ class MangaStore:
         values = {
             "source": page.sha256,
             "removal": settings.removal,
-            "renderer": 3,
+            "renderer": 4,
+            "punctuation_rules": settings.punctuation_rules,
             "regions": [
                 {
                     k: r.model_dump()[k]
@@ -196,32 +197,76 @@ class MangaStore:
         directory.mkdir(parents=True, exist_ok=True)
         added = []
         try:
+
+            def append_image(image, name):
+                if context and context.is_cancelled():
+                    raise PipelineError("CANCELLED", "导入已取消", 409)
+                if len(document.pages) >= 2000:
+                    raise PipelineError(
+                        "INVALID_MANGA_INPUT", "漫画工程最多支持 2000 页", 422
+                    )
+                if image.width * image.height > 100_000_000:
+                    raise PipelineError(
+                        "IMAGE_TOO_LARGE", f"图片超过一亿像素：{name}", 422
+                    )
+                image = ImageOps.exif_transpose(image).convert("RGB")
+                page = MangaPage(
+                    name=name,
+                    source="",
+                    sha256="",
+                    width=image.width,
+                    height=image.height,
+                )
+                destination = directory / f"{page.id}.source.png"
+                added.append(destination)
+                image.save(destination)
+                page.source = destination.name
+                page.sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
+                document.pages.append(page)
+
             for path in files:
                 if context and context.is_cancelled():
                     raise PipelineError("CANCELLED", "图片导入已取消", 409)
                 if path.suffix.lower() not in EXTENSIONS or not path.is_file():
                     raise PipelineError(
-                        "INVALID_MANGA_INPUT", f"不支持的图片：{path.name}", 422
+                        "INVALID_MANGA_INPUT", f"不支持的文件：{path.name}", 422
                     )
-                with Image.open(path) as image:
-                    if image.width * image.height > 100_000_000:
-                        raise PipelineError(
-                            "IMAGE_TOO_LARGE", f"图片超过一亿像素：{path.name}", 422
-                        )
-                    image = ImageOps.exif_transpose(image).convert("RGB")
-                    page = MangaPage(
-                        name=path.name,
-                        source="",
-                        sha256="",
-                        width=image.width,
-                        height=image.height,
-                    )
-                    destination = directory / f"{page.id}.source.png"
-                    image.save(destination)
-                added.append(destination)
-                page.source = destination.name
-                page.sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
-                document.pages.append(page)
+                if path.suffix.lower() == ".pdf":
+                    import fitz
+
+                    with fitz.open(path) as pdf:
+                        if pdf.needs_pass:
+                            raise PipelineError(
+                                "PDF_PASSWORD_REQUIRED",
+                                "PDF 需要密码，请先解密再导入",
+                                422,
+                            )
+                        if len(pdf) + len(document.pages) > 2000:
+                            raise PipelineError(
+                                "INVALID_MANGA_INPUT", "漫画工程最多支持 2000 页", 422
+                            )
+                        for index, pdf_page in enumerate(pdf):
+                            if context and context.is_cancelled():
+                                raise PipelineError("CANCELLED", "PDF 导入已取消", 409)
+                            if (
+                                pdf_page.rect.width * pdf_page.rect.height * 4
+                                > 100_000_000
+                            ):
+                                raise PipelineError(
+                                    "IMAGE_TOO_LARGE", "PDF 页面尺寸过大", 422
+                                )
+                            pixmap = pdf_page.get_pixmap(
+                                matrix=fitz.Matrix(2, 2),
+                                colorspace=fitz.csRGB,
+                                alpha=False,
+                            )
+                            image = Image.frombytes(
+                                "RGB", (pixmap.width, pixmap.height), pixmap.samples
+                            )
+                            append_image(image, f"{path.stem}-{index + 1:04d}.png")
+                else:
+                    with Image.open(path) as image:
+                        append_image(image, path.name)
             if workspace_id:
                 # New source records were produced by the store itself.
                 with self.lock:

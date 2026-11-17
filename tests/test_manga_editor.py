@@ -26,7 +26,7 @@ from Frontend.platform.qt_runtime import configure_qt_plugins
 class Backend:
     def request(self, method, path, **kwargs):
         if path == "/api/v2/manga/capabilities":
-            return {"editor_version": 3}
+            return {"editor_version": 4}
         if path == "/api/config":
             return {"config": {"platforms": {}}}
         if method == "PATCH":
@@ -224,7 +224,7 @@ def test_missing_preview_falls_back_and_late_page_response_is_ignored():
     )
     doc.settings.removal = "precise"
     editor.loaded(doc.model_dump())
-    editor.variant.setCurrentIndex(editor.variant.findData("render"))
+    editor.variant.setCurrentIndex(editor.variant.findData("edit"))
     editor.select_page(1)
     editor.pool.waitForDone(3000)
     app.processEvents()
@@ -268,11 +268,14 @@ def test_live_resize_reflows_text_before_mouse_release():
     editor.add_region({"x": 40, "y": 40, "width": 240, "height": 300, "rotation": 0})
     editor.region_value("target", "文字应当随框实时排版，而不必切换页面。" * 5)
     editor.style_value("size", 48)
+    editor.style_value("autofit", True)
     editor.draw_canvas()
     editor.canvas.fitInView(editor.canvas.sceneRect(), Qt.KeepAspectRatio)
     app.processEvents()
     item = next(i for i in editor.canvas.scene().items() if isinstance(i, RegionItem))
-    assert editor.size.lineEdit().width() >= 24  # Fluent arrow buttons must not hide the numeric value
+    assert (
+        editor.size.lineEdit().width() >= 24
+    )  # Fluent arrow buttons must not hide the numeric value
     original_size = item.layout_info["font_size"]
     original_undo_count = editor.undo.count()
     start = editor.canvas.mapFromScene(QPointF(277, 337))
@@ -428,22 +431,413 @@ def test_task_undo_does_not_revert_human_changes_already_saved_to_backend():
 
 def test_late_background_results_are_disconnected_after_editor_cleanup():
     from threading import Event
-    from PyQt5.QtCore import QCoreApplication,QEvent
+
     from PyQt5 import sip
-    app=QApplication.instance()
-    release=Event()
-    called=[]
-    pool=None
+    from PyQt5.QtCore import QCoreApplication, QEvent
+
+    app = QApplication.instance()
+    release = Event()
+    called = []
+    pool = None
     for _ in range(20):
-        editor=MangaPage(backend=Backend())
-        pool=editor.pool
-        editor.background(lambda: (release.wait(2),42)[1], called.append)
+        editor = MangaPage(backend=Backend())
+        pool = editor.pool
+        editor.background(lambda: (release.wait(2), 42)[1], called.append)
         editor.cleanup()
         editor.deleteLater()
         app.processEvents()
-        QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         assert sip.isdeleted(editor)
     release.set()
     pool.waitForDone(4000)
     app.processEvents()
     assert called == []
+
+
+def make_editor_for_actions():
+    from Backend.domain.models.manga import Region
+
+    editor = MangaPage(backend=Backend())
+    editor.load_image = lambda: None
+    doc = MangaWorkspace(
+        pages=[
+            Page(
+                name=f"page{i}.png",
+                source=f"p{i}",
+                sha256="",
+                width=640,
+                height=800,
+                regions=[Region(source="original", target="translated")],
+            )
+            for i in range(2)
+        ]
+    )
+    editor.loaded(doc.model_dump())
+    editor.select_region(doc.pages[0].regions[0].id)
+    return editor
+
+
+def dispose_editor(editor):
+    app = QApplication.instance()
+    editor.cleanup()
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    assert editor.last_callback_error is None
+    editor.close()
+    editor.deleteLater()
+    app.processEvents()
+
+
+def test_all_style_defaults_are_inherited_and_clear_actions_are_undoable(monkeypatch):
+    from PyQt5.QtWidgets import QMessageBox
+
+    editor = make_editor_for_actions()
+    editor.style_value("size", 42)
+    editor.style_value("bold", True)
+    editor.apply_style(True)
+    editor.pages.setCurrentRow(1)
+    editor.add_region({"x": 220, "y": 20, "width": 100, "height": 120, "rotation": 0})
+    assert editor.region()["style"]["size"] == 42
+    assert editor.region()["style"]["bold"]
+    assert not editor.region()["style"]["autofit"]
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    editor.clear_content("target", "整部漫画")
+    assert all(not r["target"] for p in editor.document["pages"] for r in p["regions"])
+    editor.undo.undo()
+    assert editor.document["pages"][0]["regions"][0]["target"] == "translated"
+    editor.clear_content("source", "当前页")
+    assert all(not r["source"] for r in editor.page()["regions"])
+    editor.undo.undo()
+    assert editor.page()["regions"][0]["source"] == "original"
+    count = len(editor.page()["regions"])
+    editor.clear_content("regions", "当前页")
+    assert not editor.page()["regions"]
+    editor.undo.undo()
+    assert len(editor.page()["regions"]) == count
+    editor.clear_selection()
+    assert not editor.selected
+    dispose_editor(editor)
+
+
+def test_one_click_prompts_and_manual_switch_follow_banner(monkeypatch):
+    from PyQt5.QtWidgets import QMessageBox
+
+    editor = make_editor_for_actions()
+    calls = []
+    editor.run = lambda stage, **kw: calls.append((stage, kw))
+    editor.document["pages"][0]["regions"] = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    editor.one_click_translation()
+    assert calls[-1][0] == "recognize" and callable(calls[-1][1]["after"])
+    calls[-1][1]["after"]()
+    assert calls[-1][0] == "translate"
+    editor.ask_ocr(0)
+    assert calls[-1][0] == "recognize"
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    editor.ask_detection(0)
+    assert calls[-1][0] == "detect"
+    editor.job_id = "running"
+    editor.current_job_stage = "recognize"
+    editor.follow_progress = True
+    editor.processing_page_id = editor.document["pages"][0]["id"]
+    editor.pages.setCurrentRow(1)
+    assert not editor.follow_progress and not editor.follow_banner.isHidden()
+    editor.resume_follow()
+    assert editor.follow_progress and editor.follow_banner.isHidden()
+    assert editor.page_id == editor.processing_page_id
+    editor.job_id = None
+    dispose_editor(editor)
+
+
+def test_menus_reading_panel_compact_pages_and_zoom():
+    from qfluentwidgets import DropDownPushButton
+
+    app = QApplication.instance()
+    editor = make_editor_for_actions()
+    menus = {
+        button.text(): button.task_menu
+        for button in editor.findChildren(DropDownPushButton)
+        if hasattr(button, "task_menu")
+    }
+    assert [a.text() for a in menus["识别"]._actions] == ["识别当前页", "OCR 当前页"]
+    assert all("选中的框" not in a.text() for a in menus["翻译"]._actions)
+    assert {"术语表（公共）", "禁翻表（公共）", "文本替换（公共）"}.issubset(
+        {a.text() for a in menus["翻译"]._actions}
+    )
+    assert not any(
+        "导入文件夹" in a.text() or "导出译文" in a.text()
+        for a in menus["文件"]._actions
+    )
+    assert editor.reading_panel.isHidden() and editor.progress_panel.isHidden()
+    editor.reading_action.setChecked(True)
+    assert not editor.reading_panel.isHidden()
+    editor.resize(1280, 900)
+    editor.show()
+    app.processEvents()
+    editor.page_panel.setFixedWidth(64)
+    editor.update_page_labels()
+    assert editor.pages.item(0).text() == "1" and editor.page_bar_widget.isHidden()
+    assert editor.pages.item(0).toolTip() == "page0.png"
+    editor.canvas.setSceneRect(0, 0, 640, 800)
+    editor.fit_canvas()
+    editor.zoom_slider.setValue(100)
+    assert abs(editor.canvas.transform().m11() - 1) < 0.001
+    assert (
+        editor.zoom_overlay.x() + editor.zoom_overlay.width()
+        <= editor.canvas.viewport().width()
+    )
+    assert (
+        editor.zoom_overlay.y() + editor.zoom_overlay.height()
+        <= editor.canvas.viewport().height()
+    )
+    dispose_editor(editor)
+
+
+def test_right_click_ocr_and_delete_apply_only_to_clicked_frame(monkeypatch):
+    from PyQt5.QtCore import QPoint
+    from qfluentwidgets import RoundMenu
+
+    editor = make_editor_for_actions()
+    region_id = editor.page()["regions"][0]["id"]
+    editor.add_region({"x": 220, "y": 20, "width": 100, "height": 120, "rotation": 0})
+    actions = []
+    monkeypatch.setattr(
+        RoundMenu, "exec", lambda menu, *a, **k: actions.extend(menu._actions)
+    )
+    editor.region_context_menu(region_id, QPoint(0, 0))
+    calls = []
+    editor.run = lambda stage, **kw: calls.append((stage, kw))
+    next(a for a in actions if a.text() == "OCR 此框").trigger()
+    assert calls[-1][1]["region_ids"] == [region_id] and calls[-1][1]["scope"] == 0
+    next(a for a in actions if a.text() == "删除此框（可撤销）").trigger()
+    assert (
+        len(editor.page()["regions"]) == 1
+        and editor.page()["regions"][0]["id"] != region_id
+    )
+    editor.undo.undo()
+    assert len(editor.page()["regions"]) == 2
+    dispose_editor(editor)
+
+
+def test_live_style_and_undo_reuse_backdrop_without_baking():
+    from PyQt5.QtCore import QBuffer, QIODevice, Qt
+    from PyQt5.QtGui import QImage
+
+    from Frontend.pages.media.manga_canvas import RegionItem
+
+    app = QApplication.instance()
+    editor = make_editor_for_actions()
+    image = QImage(640, 800, QImage.Format_RGB32)
+    image.fill(Qt.white)
+    buffer = QBuffer()
+    buffer.open(QIODevice.WriteOnly)
+    image.save(buffer, "PNG")
+    editor.image_data = bytes(buffer.data())
+    editor.source_cache[editor.page_id] = editor.image_data
+    editor.resize(1400, 1000)
+    editor.show()
+    editor.draw_canvas()
+    app.processEvents()
+    background_key = editor.canvas.pixmap_item.pixmap().cacheKey()
+    item = next(i for i in editor.canvas.scene().items() if isinstance(i, RegionItem))
+    before = item.text_key
+    editor.style_value("color", "#ff0000")
+    app.processEvents()
+    assert item.text_key != before
+    assert editor.canvas.pixmap_item.pixmap().cacheKey() == background_key
+    editor.undo.undo()
+    app.processEvents()
+    assert item.text_key == before
+    assert editor.canvas.pixmap_item.pixmap().cacheKey() == background_key
+    assert editor.variant.currentData() == "edit"
+    dispose_editor(editor)
+
+
+def test_updater_uses_our_prereleases_and_rejects_other_repository_assets(monkeypatch):
+    import Frontend.app.updates as updates
+    from Frontend.app.updates import VersionManager
+    from Frontend.services.fork_updates import RELEASES_API, WINDOWS_ASSET
+
+    calls = []
+    releases = [
+        {
+            "tag_name": "manga-18-abcdef0",
+            "draft": False,
+            "prerelease": True,
+            "html_url": "https://github.com/Xitaoyou/AiNieePlus/releases/tag/manga-18-abcdef0",
+            "assets": [
+                {
+                    "name": WINDOWS_ASSET,
+                    "browser_download_url": "https://github.com/Xitaoyou/AiNieePlus/releases/download/manga-18-abcdef0/"
+                    + WINDOWS_ASSET,
+                }
+            ],
+        }
+    ]
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return releases
+
+    monkeypatch.setattr(
+        updates.requests, "get", lambda url, **kw: calls.append(url) or Response()
+    )
+    manager = VersionManager(version="AiNieePlus 17")
+    assert manager.check_for_updates() == (True, "18")
+    assert all(url == RELEASES_API for url in calls)
+    manager.current_version = "18"
+    assert manager.check_for_updates() == (False, "18")
+    manager.current_version = "17"
+    releases[0]["assets"][0]["browser_download_url"] = (
+        "https://github.com/NEKOparapa/AiNiee/releases/download/new/other.zip"
+    )
+    assert manager.check_for_updates() == (False, "17")
+
+
+def test_task_progress_is_hidden_without_job_and_after_completion():
+    editor = make_editor_for_actions()
+    app = QApplication.instance()
+    backend = editor.client.backend
+    old_request = backend.request
+
+    def request(method, path, **kwargs):
+        if path == "/api/jobs/demo":
+            return {
+                "job": {
+                    "state": "succeeded",
+                    "progress": {"current": 1, "total": 1},
+                    "result": {},
+                }
+            }
+        return old_request(method, path, **kwargs)
+
+    backend.request = request
+    assert editor.progress_panel.isHidden()
+    editor.start_request(lambda: {"job": {"id": "demo"}}, lambda result: None)
+    assert not editor.progress_panel.isHidden()
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    editor.poll_job()
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    assert editor.progress_panel.isHidden() and editor.job_id is None
+    dispose_editor(editor)
+
+
+def test_punctuation_dialog_edits_same_saved_rules_and_toggle_does_not_restore_deleted_rules():
+    from Frontend.pages.media.manga_page import PunctuationRulesDialog
+    from Shared.manga_lettering import DEFAULT_PUNCTUATION_RULES, normalize_punctuation
+
+    app = QApplication.instance()
+    editor = make_editor_for_actions()
+    state = {"enabled": False, "rows": deepcopy(DEFAULT_PUNCTUATION_RULES)}
+    old_request = editor.client.backend.request
+
+    def request(method, path, **kw):
+        if path == "/api/v2/manga/punctuation":
+            if method == "POST":
+                state["enabled"] = kw["json"]["enabled"]
+                if "rows" in kw["json"]:
+                    state["rows"] = deepcopy(kw["json"]["rows"])
+            return deepcopy(state)
+        return old_request(method, path, **kw)
+
+    editor.client.backend.request = request
+    dialog = PunctuationRulesDialog(editor)
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    assert any(
+        dialog.table.item(i, 0).text() == "．．．"
+        for i in range(dialog.table.rowCount())
+    )
+    dialog.enabled.setChecked(True)
+    dialog.save_rules()
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    assert state["enabled"] and editor.region()["style"]["auto_punctuation"]
+    assert (
+        normalize_punctuation(
+            "．．．", editor.document["settings"]["punctuation_rules"]
+        )
+        == "..."
+    )
+    row = next(
+        i
+        for i in range(dialog.table.rowCount())
+        if dialog.table.item(i, 0).text() == "．．．"
+    )
+    dialog.table.selectRow(row)
+    dialog.remove_rows()
+    dialog.save_rules()
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    editor.set_auto_punctuation(False)
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    editor.set_auto_punctuation(True)
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    assert not any(r["src"] == "．．．" for r in state["rows"])
+    assert editor.document["settings"]["punctuation_rules"] == state["rows"]
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()
+    dispose_editor(editor)
+
+
+def test_public_table_links_use_existing_main_window_pages_and_import_picker_accepts_directories(
+    monkeypatch, tmp_path
+):
+    from PyQt5.QtWidgets import QWidget
+
+    from Frontend.pages.media.manga_page import MixedImportDialog
+
+    app = QApplication.instance()
+
+    class Host(QWidget):
+        def switchTo(self, page):
+            self.switched_to = page
+
+    host = Host()
+    host.prompt_dictionary_page = QWidget(host)
+    host.exclusion_list_page = QWidget(host)
+    host.text_replace_b_page = QWidget(host)
+    editor = MangaPage(parent=host, backend=Backend())
+    editor.save = lambda callback=None: callback() if callable(callback) else None
+    for name in (
+        "prompt_dictionary_page",
+        "exclusion_list_page",
+        "text_replace_b_page",
+    ):
+        editor.open_public_table(name)
+        assert host.switched_to is getattr(host, name)
+    picker = MixedImportDialog(editor)
+    file = tmp_path / "page.pdf"
+    file.write_bytes(b"fixture")
+    monkeypatch.setattr(picker, "selectedFiles", lambda: [str(tmp_path), str(file)])
+    picker.accept()
+    assert set(picker.paths) == {str(tmp_path.resolve()), str(file.resolve())}
+    assert ".pdf" in editor.start_page.drop_card.file_extensions
+    picker.deleteLater()
+    app.processEvents()
+    dispose_editor(editor)
+    host.deleteLater()
+    app.processEvents()
+
+
+def test_import_dialog_accepts_selected_real_directory(tmp_path):
+    from Frontend.pages.media.manga_page import MixedImportDialog
+
+    app = QApplication.instance()
+    folder = tmp_path / "pictures"
+    folder.mkdir()
+    dialog = MixedImportDialog()
+    dialog.setDirectory(str(tmp_path))
+    dialog.selectFile(str(folder))
+    app.processEvents()
+    dialog.accept()
+    assert dialog.paths == [str(folder.resolve())]
+    dialog.deleteLater()
+    app.processEvents()

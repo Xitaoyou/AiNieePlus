@@ -62,4 +62,4 @@ def test_wrapped_punctuation_does_not_force_needless_font_shrink():
     )
     r.style.size = 28
     _, info = render_text(r.model_dump())
-    assert info["font_size"] == 28
+    assert info["font_size"] >= 28

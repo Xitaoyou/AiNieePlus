@@ -162,6 +162,8 @@ def worker(
             render_data["revision"],
             ModelRegistry(root=folder or None, bundled=render_data["bundled"] or None),
             background_key=render_data.get("background_key"),
+            background_only=render_data.get("background_only", False),
+            punctuation_rules=render_data.get("punctuation_rules"),
         )
     with Image.open(image_path) as image:
         image = image.convert("RGB")

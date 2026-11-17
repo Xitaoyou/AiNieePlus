@@ -56,11 +56,14 @@ jobs:
             Backend/resources/manga/fonts
           key: manga-core-${{ hashFiles('Backend/resources/manga/source-lock.json') }}
 
+      - name: Stamp AiNieePlus release version
+        run: python Tools/stamp_fork_version.py
+
       - name: Prepare offline manga models and fonts
         run: python -m Tools.prepare_manga_models --download
 
       - name: Verify manga backend workflows
-        run: python Tools/run_manga_tests.py tests/test_manga.py tests/test_manga_api.py tests/test_manga_lettering.py -q
+        run: python Tools/run_manga_tests.py tests --ignore=tests/test_manga_editor.py -q
 
       - name: Verify manga Fluent editor
         env:
@@ -122,7 +125,7 @@ jobs:
           }
           $sourceRoot = (Resolve-Path dist/AiNiee).Path
           $outputRoot = Join-Path $PWD 'dist/installer'
-          & $compiler "/DSourceRoot=$sourceRoot" "/DOutputRoot=$outputRoot" Tools/Packaging/windows/AiNieePlus.iss
+          & $compiler "/DAppVersion=$env:GITHUB_RUN_NUMBER.0" "/DSourceRoot=$sourceRoot" "/DOutputRoot=$outputRoot" Tools/Packaging/windows/AiNieePlus.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed" }
 
       - name: Verify installed x64 package
@@ -207,6 +210,9 @@ jobs:
           python -m pip install -r requirements-frontend.txt -r requirements-backend.txt "pyinstaller>=6.21.0"
           python -m pip install --no-deps -r requirements_no_deps.txt
           python -m pip cache purge
+
+      - name: Stamp AiNieePlus release version
+        run: python Tools/stamp_fork_version.py
 
       - name: Prepare offline manga models and fonts
         run: python -m Tools.prepare_manga_models --download

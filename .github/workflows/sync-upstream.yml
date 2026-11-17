@@ -1,0 +1,74 @@
+name: Sync AiNiee upstream and build AiNieePlus
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+jobs:
+  sync:
+    if: github.repository == 'Xitaoyou/AiNieePlus'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Configure merge identity
+        run: |
+          git config user.name "AiNieePlus upstream sync"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements-frontend.txt
+            requirements-backend.txt
+            requirements_no_deps.txt
+      - name: Prepare upstream merge without overwriting conflicts
+        id: merge
+        run: python Tools/sync_upstream.py --report "$env:RUNNER_TEMP/upstream-sync.json"
+      - name: Install regression dependencies
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          python -m pip install -r requirements-frontend.txt -r requirements-backend.txt pytest
+          python -m pip install --no-deps -r requirements_no_deps.txt
+      - uses: actions/cache@v4
+        if: steps.merge.outputs.changed == 'true'
+        with:
+          path: |
+            Backend/resources/manga/models
+            Backend/resources/manga/fonts
+          key: manga-core-${{ hashFiles('Backend/resources/manga/source-lock.json') }}
+      - name: Verify merged source before pushing
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m Tools.prepare_manga_models --download
+          python Tools/run_manga_tests.py tests --ignore=tests/test_manga_editor.py -q
+          if ($LASTEXITCODE -ne 0) { throw "Backend regression failed; merge was not pushed" }
+          python Tools/run_manga_tests.py tests/test_manga_editor.py -q
+          if ($LASTEXITCODE -ne 0) { throw "Editor regression failed; merge was not pushed" }
+      - name: Push tested merge and dispatch Windows installer build
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push origin HEAD:main
+          if ($LASTEXITCODE -ne 0) { throw "Main changed during verification; no force push performed" }
+          gh workflow run main.yml --ref main -f include_macos=false
+          if ($LASTEXITCODE -ne 0) { throw "Merge pushed but installer dispatch failed" }
+      - name: Preserve sync report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-report
+          path: ${{ runner.temp }}/upstream-sync.json
+          if-no-files-found: ignore

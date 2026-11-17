@@ -245,7 +245,7 @@ class AppFluentWindow(FluentWindow, ConfigMixin, LogMixin, ToastMixin, Base):
 
     # 打开项目主页
     def open_project_page(self) -> None:
-        QDesktopServices.openUrl(QUrl("https://github.com/NEKOparapa/AiNiee"))
+        QDesktopServices.openUrl(QUrl("https://github.com/Xitaoyou/AiNieePlus"))
 
     def install_macos_menu(self) -> None:
         if not is_macos():

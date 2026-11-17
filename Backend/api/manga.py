@@ -13,8 +13,20 @@ from Backend.application.pipeline_common import PipelineError
 from Backend.domain.models.manga import MangaSettings, MangaWorkspace
 
 
+class ReplacementRule(RequestModel):
+    src: str = Field(min_length=1, max_length=4096)
+    dst: str = Field(default="", max_length=4096)
+    regex: bool = False
+
+
+class PunctuationUpdate(RequestModel):
+    enabled: bool
+    rows: list[ReplacementRule] | None = Field(default=None, max_length=2000)
+    baseline: list[ReplacementRule] | None = Field(default=None, max_length=2000)
+
+
 class MangaImport(RequestModel):
-    paths: list[str] = Field(min_length=1, max_length=100)
+    paths: list[str] = Field(min_length=1, max_length=2000)
     settings: MangaSettings = Field(default_factory=MangaSettings)
     workspace_id: str | None = None
     recognize: bool = False
@@ -60,9 +72,30 @@ def create_manga_router(runtime, authorized, service=None):
     service = service or MangaService()
     runtime.manga = service
 
+    from Backend.application.manga_punctuation import get_state, update_rules
+
+    service.punctuation_provider = lambda: get_state(runtime.load_config())
+
+    @router.get("/punctuation")
+    def punctuation():
+        return get_state(runtime.load_config())
+
+    @router.post("/punctuation")
+    def save_punctuation(body: PunctuationUpdate):
+        rows = [r.model_dump() for r in body.rows] if body.rows is not None else None
+        baseline = (
+            [r.model_dump() for r in body.baseline]
+            if body.baseline is not None
+            else None
+        )
+        config = runtime.update_config(
+            lambda config: update_rules(config, body.enabled, rows, baseline)
+        )
+        return get_state(config)
+
     @router.get("/capabilities")
     def capabilities():
-        return {"editor_version": 3, "progressive_recognition": True}
+        return {"editor_version": 4, "progressive_recognition": True}
 
     @router.get("/models")
     def models():

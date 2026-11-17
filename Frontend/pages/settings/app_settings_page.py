@@ -77,7 +77,7 @@ class AppSettingsPage(GroupedSettingsPage, LogMixin):
         updates.add_field("自动检查更新", self.auto_update_switch,
                           "启用此功能后,应用将在启动时自动检查是否有新版本")
         self.check_update_button = PushButton(FluentIcon.UPDATE, self.tra("检查更新"), self.editor)
-        updates.add_field("检查更新", self.check_update_button, "点击按钮手动检查是否有新版本可用")
+        updates.add_field("检查更新", self.check_update_button, "仅检查 Xitaoyou/AiNieePlus 发布的新版本")
 
         self.proxy_edit.textChanged.connect(self._schedule_save)
         self.proxy_edit.editingFinished.connect(self._save_settings)

@@ -21,6 +21,7 @@ from Frontend.core.config import ConfigMixin
 from Frontend.core.paths import downloads_dir, executable_root
 from Frontend.core.resources import frontend_resource_path
 from Frontend.platform.platform_paths import is_macos, is_windows, release_api_url
+from Frontend.services.fork_updates import RELEASES_API, RELEASES_URL, WINDOWS_ASSET, own_download_url, release_version
 from Frontend.core.log import LogMixin
 from Frontend.components.toast import ToastMixin
 from Frontend.components.dialogs.update_dialog import UpdateMessageBox
@@ -71,8 +72,7 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
             return "0.0.0"
 
     def _get_release_version(self, tag_name: str) -> str:
-        match = re.search(r"\d+(?:\.\d+)*", tag_name)
-        return match.group(0) if match else "0.0.0"
+        return release_version(tag_name)
 
     def _update_file_suffix(self) -> str:
         if is_macos():
@@ -104,23 +104,20 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
         return ".zip"
 
     def _find_download_url(self, assets: list[dict]) -> str | None:
-        expected_suffix = self._expected_update_asset_suffix()
-        if is_windows():
-            # Prefer the complete desktop package over source/backend-only ZIPs.
-            assets = sorted(assets, key=lambda asset: "windows" not in asset.get("name", "").lower())
         for asset in assets:
-            name = asset.get("name", "").lower()
-            if is_windows() and any(part in name for part in ("macos", "darwin", "linux", "source", "backend", "frontend", "arm64", "aarch64")):
-                continue
-            if name.endswith(expected_suffix) and asset.get("browser_download_url"):
-                return asset["browser_download_url"]
+            name = asset.get("name", "")
+            valid = (
+                name == WINDOWS_ASSET
+                if is_windows()
+                else name.lower().endswith(self._expected_update_asset_suffix())
+            )
+            url = asset.get("browser_download_url", "")
+            if valid and own_download_url(url):
+                return url
         return None
 
-    def _release_list_api_url(self) -> str:
-        latest_suffix = "/latest"
-        if self.GITHUB_API_URL.endswith(latest_suffix):
-            return self.GITHUB_API_URL[: -len(latest_suffix)]
-        return self.GITHUB_API_URL
+    def _release_list_api_url(self):
+        return RELEASES_API
 
     def _select_compatible_update_release(self, releases: list[dict]):
         # GitHub latest 可能是 macOS-only，更新提示必须先筛出当前平台可用资产。
@@ -129,7 +126,7 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
         selected_download_url = None
 
         for release in releases:
-            if release.get("draft") or release.get("prerelease"):
+            if release.get("draft"):
                 continue
 
             release_version = self._get_release_version(str(release.get("tag_name", "")))
@@ -175,47 +172,22 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
         self.latest_download_url = download_url
 
     def check_for_updates(self):
-        """检查是否需要更新"""
+        """Only compatible releases from our own fork, including CI prereleases."""
         self.check_error = None
         self.latest_download_url = None
         try:
-            response = requests.get(self.GITHUB_API_URL, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                release, release_version, download_url = self._select_compatible_update_release([data])
-                if release is not None:
-                    self._remember_update_release(release, release_version, download_url)
-                    return True, release_version
-
-                self.latest_version = self._get_release_version(data["tag_name"])
-
-                self.latest_version_url = data["html_url"]
-
-                if self._compare_versions(self.latest_version, self.current_version) > 0:
-                    release, release_version, download_url, error_status = self._find_compatible_update_release()
-                    if error_status is not None:
-                        self.check_error = f"{self.tra('HTTP错误')}: {error_status}"
-                        return False, self.current_version
-                    if release is not None:
-                        self._remember_update_release(release, release_version, download_url)
-                        return True, release_version
-
-                    return False, self.current_version
-                else:
-                    return False, self.current_version
-            elif response.status_code == 404 and is_macos():
+            release, version, url, status = self._find_compatible_update_release()
+            if status is not None:
+                self.check_error = f"{self.tra('HTTP错误')}: {status}"
+                return False, self.current_version
+            if release is None:
                 self.latest_version = self.current_version
-                self.latest_version_url = "https://github.com/NEKOparapa/AiNiee/releases"
+                self.latest_version_url = RELEASES_URL
                 return False, self.current_version
-            else:
-                self.error(f"Failed to check for updates: {response.status_code}")
-
-                self.check_error = f"{self.tra('HTTP错误')}: {response.status_code}"
-                return False, self.current_version
-        except Exception as e:
-            self.error(f"Error checking for updates: {e}")
-
-            self.check_error = str(e)
+            self._remember_update_release(release, version, url)
+            return True, version
+        except Exception as error:
+            self.check_error = str(error)
             return False, self.current_version
 
     def _compare_versions(self, version1, version2):
@@ -543,6 +515,9 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
             self.status_label.setText(self.tra("源码运行时请通过 Git 更新，自动安装仅支持打包版本"))
 
     def _start_download_with_url(self, url):
+        if not own_download_url(url):
+            self.signals.download_failed.emit("更新来源不是 Xitaoyou/AiNieePlus，已取消下载")
+            return
         """使用指定URL开始下载"""
         if getattr(self, "_update_cancelled", False):
             return
@@ -654,6 +629,9 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
             )
 
     def _download_update(self, url):
+        if not own_download_url(url):
+            self.signals.download_failed.emit("更新来源不是 Xitaoyou/AiNieePlus，已取消下载")
+            return
         """下载更新文件，支持断点续传"""
         try:
             # 如果目录不存在，则创建

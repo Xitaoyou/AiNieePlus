@@ -1,8 +1,9 @@
 """Editable manga documents: source, erasure, and lettering geometry are independent."""
 
+import math
 from typing import Literal
 from uuid import uuid4
-import math
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -34,6 +35,7 @@ class LetterStyle(MangaModel):
     size: int = Field(default=28, ge=6, le=512)
     min_size: int = Field(default=10, ge=6, le=512)
     autofit: bool = True
+    auto_punctuation: bool = False
     vertical: bool = False
     bold: bool = False
     color: str = "#000000"
@@ -108,6 +110,7 @@ class MangaPage(MangaModel):
     regions: list[Region] = Field(default_factory=list)
     panels: list[dict] = Field(default_factory=list)
     stages: dict[str, dict] = Field(default_factory=dict)
+    default_style: LetterStyle | None = None
 
 
 class MangaSettings(MangaModel):
@@ -121,6 +124,9 @@ class MangaSettings(MangaModel):
     confidence: float = Field(default=0.5, ge=0.05, le=1)
     removal: Literal["precise", "fill", "none"] = "fill"
     auto_recognize: bool = True
+    default_style: LetterStyle = Field(default_factory=LetterStyle)
+    punctuation_rules: list[dict] | None = Field(default=None, max_length=2000)
+    punctuation_enabled: bool = False
 
 
 class MangaWorkspace(MangaModel):
