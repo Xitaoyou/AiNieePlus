@@ -268,14 +268,17 @@ def test_live_resize_reflows_text_before_mouse_release():
     editor.add_region({"x": 40, "y": 40, "width": 240, "height": 300, "rotation": 0})
     editor.region_value("target", "文字应当随框实时排版，而不必切换页面。" * 5)
     editor.style_value("size", 48)
-    editor.style_value("autofit", True)
+    app.processEvents()
+    assert editor.size.isEnabled()  # entering a size switches to fixed mode
+    assert (
+        editor.size.lineEdit().width() >= 24
+    )  # Fluent arrow buttons must not hide the numeric value
+    editor.style_value("autofit", True)  # back to auto-fit for the resize test
+    assert not editor.size.isEnabled()
     editor.draw_canvas()
     editor.canvas.fitInView(editor.canvas.sceneRect(), Qt.KeepAspectRatio)
     app.processEvents()
     item = next(i for i in editor.canvas.scene().items() if isinstance(i, RegionItem))
-    assert (
-        editor.size.lineEdit().width() >= 24
-    )  # Fluent arrow buttons must not hide the numeric value
     original_size = item.layout_info["font_size"]
     original_undo_count = editor.undo.count()
     start = editor.canvas.mapFromScene(QPointF(277, 337))
@@ -527,15 +530,24 @@ def test_one_click_prompts_and_manual_switch_follow_banner(monkeypatch):
     editor.run = lambda stage, **kw: calls.append((stage, kw))
     editor.document["pages"][0]["regions"] = []
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    undetected, pending = editor.pending_counts(1)
+    assert undetected == 1 and pending == 0
     editor.one_click_translation()
     assert calls[-1][0] == "recognize" and callable(calls[-1][1]["after"])
     calls[-1][1]["after"]()
     assert calls[-1][0] == "translate"
     editor.ask_ocr(0)
     assert calls[-1][0] == "recognize"
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    # ask_detection now uses the task confirm dialog (once-per-task replace)
+    seen = []
+    monkeypatch.setattr(
+        editor,
+        "confirm_task",
+        lambda title, message, checkbox=None: seen.append(message) or (QMessageBox.No, True),
+    )
     editor.ask_detection(0)
-    assert calls[-1][0] == "detect"
+    assert calls[-1][0] == "detect" and calls[-1][1]["replace"] is True
+    assert seen, "confirmation should explain what is incomplete"
     editor.job_id = "running"
     editor.current_job_stage = "recognize"
     editor.follow_progress = True
@@ -560,21 +572,29 @@ def test_menus_reading_panel_compact_pages_and_zoom():
         if hasattr(button, "task_menu")
     }
     assert [a.text() for a in menus["识别"]._actions] == [
-        "识别当前页",
-        "识别全部页面",
-        "OCR 当前页",
-        "OCR 全部页面",
-        "重做已有识别（覆盖现有文字框与原文）",
+        "检测当前页文字框",
+        "读取当前页原文（OCR）",
     ]
+    assert {"翻译当前页"}.issubset({a.text() for a in menus["翻译"]._actions})
+    assert {"导入图片 / PDF…", "导入文件夹…", "导出成品…"}.issubset(
+        {a.text() for a in menus["文件"]._actions}
+    )
     assert all("选中的框" not in a.text() for a in menus["翻译"]._actions)
     assert {"术语表（公共）", "禁翻表（公共）", "文本替换（公共）"}.issubset(
         {a.text() for a in menus["翻译"]._actions}
     )
     assert not any(
-        "导入文件夹" in a.text() or "导出译文" in a.text()
+        "导出译文" in a.text() or "JSON" in a.text()
         for a in menus["文件"]._actions
-    )
-    assert not editor.reading_panel.isHidden() and editor.progress_panel.isHidden()
+    ), "JSON 互通应在「更多」菜单"
+    assert any(
+        "JSON" in a.text() for a in menus["更多"]._actions
+    ), "更多菜单应有 JSON 互通入口"
+    assert editor.reading_panel.isHidden() and editor.progress_panel.isHidden()
+    editor.reading_toggle.click()
+    assert not editor.reading_panel.isHidden()
+    editor.reading_toggle.click()
+    assert editor.reading_panel.isHidden()
     editor.resize(1280, 900)
     editor.show()
     app.processEvents()

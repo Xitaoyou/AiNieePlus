@@ -73,12 +73,24 @@ class RegionItem(QGraphicsRectItem):
                 self.text_pixmap.loadFromData(buffer.getvalue())
                 self.text_key = key
             painter.drawPixmap(0, 0, self.text_pixmap)
-        painter.setPen(QPen(QColor("#ffbc42" if self.isSelected() else "#25b9e8"), 2))
+        if self.isSelected():
+            painter.setPen(QPen(QColor("#ffbc42"), 2))
+        elif self.rect_key == "ocr_rect":
+            pen = QPen(QColor("#23c087"), 2)
+            pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+        elif self.rect_key == "erase_rect":
+            pen = QPen(QColor("#e78a4e"), 2)
+            pen.setStyle(Qt.DashDotLine)
+            painter.setPen(pen)
+        else:
+            painter.setPen(QPen(QColor("#25b9e8"), 2))
         painter.drawRect(self.rect())
+        badge = {"ocr_rect": " 取字", "erase_rect": " 去字"}.get(self.rect_key, "")
         painter.drawText(
             self.rect().adjusted(4, 0, -4, 0),
             Qt.AlignTop | Qt.AlignLeft,
-            str(self.region.get("order", 0) + 1),
+            str(self.region.get("order", 0) + 1) + badge,
         )
         if self.isSelected():
             painter.fillRect(
@@ -154,6 +166,8 @@ class MangaCanvas(QGraphicsView):
     modeRequested = pyqtSignal(int)
     zoomChanged = pyqtSignal(float)
     layoutMeasured = pyqtSignal(str, dict)
+    geometryEscapeRequested = pyqtSignal()
+    escapeRequested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -395,11 +409,20 @@ class MangaCanvas(QGraphicsView):
             self.modeRequested.emit(0 if event.key() == Qt.Key_V else 1)
             return
         if event.key() == Qt.Key_Escape:
+            had_preview = (
+                self.start is not None or self.box_preview is not None
+            )
             self.start = None
             self.clear_stroke_preview()
             if self.box_preview is not None:
                 self.scene().removeItem(self.box_preview)
                 self.box_preview = None
+            if had_preview:
+                return
+            if self.rect_key != "layout_rect":
+                self.geometryEscapeRequested.emit()
+            else:
+                self.escapeRequested.emit()
             return
         if event.key() == Qt.Key_Delete:
             self.deleteRequested.emit()
