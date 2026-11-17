@@ -955,7 +955,15 @@ class MangaPage(QWidget):
             self.page_id,
             self.variant.currentData(),
         )
-        ticket = (self.session, doc, page, variant, self.document["revision"])
+        ticket = (
+            self.session,
+            doc,
+            page,
+            variant,
+            self.document["revision"],
+            self.epoch,
+            uuid4().hex,
+        )
         self.image_ticket = ticket
 
         def loaded(data):
@@ -967,7 +975,15 @@ class MangaPage(QWidget):
             if fit:
                 self.canvas.fitInView(self.canvas.sceneRect(), Qt.KeepAspectRatio)
 
+        immediate_fill = (
+            variant == "render"
+            and self.dirty
+            and self.document["settings"].get("removal") == "fill"
+        )
+
         def fetch():
+            if immediate_fill:
+                return self.client.asset(doc, page, "source"), True
             if variant != "source":
                 response = self.client.backend.http.get(
                     f"/api/v2/manga/{doc}/pages/{page}/{variant}", timeout=60
