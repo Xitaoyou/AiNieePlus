@@ -559,7 +559,13 @@ def test_menus_reading_panel_compact_pages_and_zoom():
         for button in editor.findChildren(DropDownPushButton)
         if hasattr(button, "task_menu")
     }
-    assert [a.text() for a in menus["识别"]._actions] == ["识别当前页", "OCR 当前页"]
+    assert [a.text() for a in menus["识别"]._actions] == [
+        "识别当前页",
+        "识别全部页面",
+        "OCR 当前页",
+        "OCR 全部页面",
+        "重做已有识别（覆盖现有文字框与原文）",
+    ]
     assert all("选中的框" not in a.text() for a in menus["翻译"]._actions)
     assert {"术语表（公共）", "禁翻表（公共）", "文本替换（公共）"}.issubset(
         {a.text() for a in menus["翻译"]._actions}
@@ -568,9 +574,7 @@ def test_menus_reading_panel_compact_pages_and_zoom():
         "导入文件夹" in a.text() or "导出译文" in a.text()
         for a in menus["文件"]._actions
     )
-    assert editor.reading_panel.isHidden() and editor.progress_panel.isHidden()
-    editor.reading_action.setChecked(True)
-    assert not editor.reading_panel.isHidden()
+    assert not editor.reading_panel.isHidden() and editor.progress_panel.isHidden()
     editor.resize(1280, 900)
     editor.show()
     app.processEvents()

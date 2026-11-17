@@ -30,6 +30,7 @@ class MangaImport(RequestModel):
     settings: MangaSettings = Field(default_factory=MangaSettings)
     workspace_id: str | None = None
     recognize: bool = False
+    title: str | None = Field(default=None, max_length=200)
 
 
 class MangaSave(RequestModel):
@@ -172,6 +173,8 @@ def create_manga_router(runtime, authorized, service=None):
             doc = service.store.import_images(
                 body.paths, body.settings.model_dump(), body.workspace_id, context
             )
+            if body.title:
+                doc.title = body.title.strip() or doc.title
             if body.recognize and doc.settings.auto_recognize:
                 return service.run(doc.id, "recognize", context=context)
             return {"status": "success", "workspace": doc.model_dump(), "report": {}}

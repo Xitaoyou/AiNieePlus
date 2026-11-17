@@ -35,23 +35,23 @@ class MediaDropCard(SimpleCardWidget, ConfigMixin):
         self.file_extensions = self.FILE_EXTENSIONS[kind]
         self.setBorderRadius(16)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(280)
+        self.setMinimumHeight(300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._dragging = False
         self._title = self.tra("将图片拖到这里" if kind == "image" else "将视频拖到这里" if kind == "video" else "将音频拖到这里")
         icon = FluentIcon.PHOTO if kind == "image" else FluentIcon.VIDEO if kind == "video" else FluentIcon.MUSIC
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(10)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(12)
         layout.addStretch(1)
         self.icon_tile = QFrame(self)
         self.icon_tile.setObjectName("mediaImportIconTile")
-        self.icon_tile.setFixedSize(56, 56)
+        self.icon_tile.setFixedSize(84, 84)
         icon_layout = QVBoxLayout(self.icon_tile)
-        icon_layout.setContentsMargins(14, 14, 14, 14)
+        icon_layout.setContentsMargins(24, 24, 24, 24)
         self.icon_widget = IconWidget(icon, self.icon_tile)
-        self.icon_widget.setFixedSize(28, 28)
+        self.icon_widget.setFixedSize(36, 36)
         icon_layout.addWidget(self.icon_widget)
         layout.addWidget(self.icon_tile, 0, Qt.AlignHCenter)
 
@@ -59,12 +59,16 @@ class MediaDropCard(SimpleCardWidget, ConfigMixin):
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setWordWrap(True)
         layout.addWidget(self.title_label)
+        hint = CaptionLabel(self.tra("拖入文件，或点击下方按钮选择"), self)
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setTextColor("#909090", "#8a8a8a")
+        layout.addWidget(hint)
         formats = "PNG · JPG · WebP" if kind == "image" else "MP4 · MKV · MOV · AVI · WebM · M4V · WMV · FLV" if kind == "video" else "MP3 · WAV · FLAC · M4A · OGG"
         caption = CaptionLabel(formats, self)
         caption.setAlignment(Qt.AlignCenter)
         caption.setTextColor("#707070", "#a6a6a6")
         layout.addWidget(caption)
-        layout.addSpacing(6)
+        layout.addSpacing(8)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
@@ -72,7 +76,8 @@ class MediaDropCard(SimpleCardWidget, ConfigMixin):
         self.pick_files = PrimaryPushButton(icon, self.tra("选择图片" if kind == "image" else "选择视频" if kind == "video" else "选择音频"), self)
         self.pick_folder = PushButton(FluentIcon.FOLDER, self.tra("文件夹"), self)
         for button in (self.pick_files, self.pick_folder):
-            button.setMinimumHeight(36)
+            button.setMinimumHeight(38)
+            button.setMinimumWidth(132)
             buttons.addWidget(button)
         buttons.addStretch(1)
         layout.addLayout(buttons)

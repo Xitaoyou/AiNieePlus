@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
+    QLineEdit,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -403,28 +404,61 @@ class PunctuationRulesDialog(QDialog):
         self.page.background(request, saved)
 
 
-class MixedImportDialog(QFileDialog):
-    """A single picker accepts images, PDFs and selected directories."""
+IMAGE_FILTER = (
+    "图片与 PDF (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.pdf);;所有文件 (*)"
+)
 
-    def __init__(self, parent=None):
-        super().__init__(parent, "导入图片、PDF 或文件夹")
-        self.setOption(QFileDialog.DontUseNativeDialog, True)
-        self.setFileMode(QFileDialog.ExistingFiles)
-        self.setNameFilter(
-            "图片与 PDF (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.pdf);;所有文件 (*)"
-        )
-        self.setLabelText(QFileDialog.Accept, "导入所选文件或文件夹")
-        for view in self.findChildren(QAbstractItemView):
-            view.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.paths = []
 
-    def accept(self):
-        paths = [
-            str(Path(p).resolve()) for p in self.selectedFiles() if Path(p).exists()
-        ]
-        if paths:
-            self.paths = paths
-            QDialog.accept(self)
+def pick_image_paths(parent):
+    """Native multi-file picker; returns resolved existing paths."""
+    paths, _ = QFileDialog.getOpenFileNames(parent, "导入图片", "", IMAGE_FILTER)
+    return [
+        str(Path(p).resolve())
+        for p in paths
+        if p and Path(p).exists()
+    ]
+
+
+class ImportDialog(QDialog):
+    """导入弹窗：项目名称 + 原文语言 + 目标语言。"""
+
+    LANGUAGE_LABELS = [
+        ("日语", "ja"),
+        ("中文", "zh"),
+        ("英语", "en"),
+        ("韩语", "ko"),
+    ]
+
+    def __init__(self, parent=None, count=0, default_name=""):
+        super().__init__(parent)
+        self.setWindowTitle("导入漫画")
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.addWidget(QLabel(f"已选择 {count} 个文件，请确认项目信息"))
+        form = QFormLayout()
+        self.name_edit = QLineEdit()
+        self.name_edit.setText(default_name)
+        self.name_edit.selectAll()
+        self.source_language = QComboBox()
+        self.target_language = QComboBox()
+        for title, value in self.LANGUAGE_LABELS:
+            self.source_language.addItem(title, value)
+        for title, value in self.LANGUAGE_LABELS:
+            self.target_language.addItem(title, value)
+        self.target_language.setCurrentIndex(1)
+        form.addRow("项目名称", self.name_edit)
+        form.addRow("原文语言", self.source_language)
+        form.addRow("目标语言", self.target_language)
+        layout.addLayout(form)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        ok = PrimaryPushButton("开始导入")
+        ok.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        layout.addLayout(buttons)
 
 
 class MangaPage(QWidget):
@@ -472,6 +506,7 @@ class MangaPage(QWidget):
         qconfig.themeChanged.connect(self.apply_theme)
         QTimer.singleShot(0, self.refresh_history)
         QTimer.singleShot(0, self.refresh_providers)
+        QTimer.singleShot(0, self.refresh_fonts)
 
     def apply_theme(self, *_):
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -522,25 +557,222 @@ class MangaPage(QWidget):
         root = QVBoxLayout(self.work_page)
         root.setContentsMargins(24, 16, 24, 12)
         root.setSpacing(12)
-        heading = QHBoxLayout()
-        back = TransparentPushButton(FluentIcon.RETURN, "返回", self.work_page)
-        back.clicked.connect(self.back_to_start)
-        heading.addWidget(back)
-        heading.addWidget(SubtitleLabel("漫画翻译", self.work_page))
-        heading.addStretch(1)
-        heading.addWidget(QLabel("本地识别  ·  人工校对  ·  精修排版", self.work_page))
-        root.addLayout(heading)
-        command_card = SimpleCardWidget(self.work_page)
-        commands = QHBoxLayout(command_card)
-        commands.setContentsMargins(10, 8, 10, 8)
-        commands.setSpacing(6)
-        root.addWidget(command_card)
+
+        # ---- 共享控件（先创建，再布局）----
         self.history = QComboBox()
         self.history.hide()
         self.scope = QComboBox()
         self.scope.addItems(["当前页", "全部页面", "选中文字框"])
         self.scope.setCurrentIndex(1)
         self.scope.hide()
+        self.detector = QComboBox()
+        self.detector.addItems(["manga-panel", "legacy-balloon-yolov4"])
+        self.ocr = QComboBox()
+        self.ocr.addItems(["mangaocr", "rapidocr"])
+        self.detector.currentTextChanged.connect(
+            lambda v: self.set_setting("detector", v)
+        )
+        self.ocr.currentTextChanged.connect(lambda v: self.set_setting("ocr", v))
+        self.source_language = QComboBox()
+        self.source_language.addItems(["ja", "zh", "en", "ko"])
+        self.target_language = QComboBox()
+        self.target_language.addItems(["zh-CN", "en", "ja", "ko"])
+        self.source_language.currentTextChanged.connect(
+            lambda v: self.set_setting("source_language", v)
+        )
+        self.target_language.currentTextChanged.connect(
+            lambda v: self.set_setting("target_language", v)
+        )
+        self.panels = QCheckBox("检测分镜并组织阅读顺序")
+        self.panels.setChecked(True)
+        self.panels.toggled.connect(lambda v: self.set_setting("detect_panels", v))
+        self.confidence = QDoubleSpinBox()
+        self.confidence.setRange(0.05, 1)
+        self.confidence.setSingleStep(0.05)
+        self.confidence.setValue(0.5)
+        self.confidence.valueChanged.connect(
+            lambda v: self.set_setting("confidence", v)
+        )
+        self.rtl = QCheckBox("从右向左阅读")
+        self.rtl.setChecked(True)
+        self.rtl.toggled.connect(lambda v: self.set_setting("right_to_left", v))
+        self.auto_recognize = QCheckBox("导入后自动检测与 OCR")
+        self.auto_recognize.setChecked(False)
+        self.auto_recognize.toggled.connect(
+            lambda v: self.set_setting("auto_recognize", v)
+        )
+        self.provider = QComboBox()
+        self.provider.addItem("使用文本翻译当前接口", None)
+        self.provider.currentIndexChanged.connect(
+            lambda: self.set_setting("provider_id", self.provider.currentData())
+        )
+        self.precise = QCheckBox("精准去字")
+        self.precise.setToolTip(
+            "整个工程统一：勾选使用 LaMa 修复背景，取消使用色块遮挡；原图始终保留"
+        )
+        self.precise.toggled.connect(self.toggle_precise)
+        self.overwrite_detect_action = Action(
+            "重做已有识别（覆盖现有文字框与原文）", self
+        )
+        self.overwrite_detect_action.setCheckable(True)
+        self.overwrite_translate_action = Action("重做已有翻译（覆盖现有译文）", self)
+        self.overwrite_translate_action.setCheckable(True)
+        self.variant = QComboBox()
+        for title, value in [
+            ("实时编辑", "edit"),
+            ("预览成品", "render"),
+            ("查看原图", "source"),
+            ("查看去字底图", "clean"),
+            ("查看蒙版", "mask"),
+            ("查看文字层", "layer"),
+        ]:
+            self.variant.addItem(title, value)
+        self.variant.setCurrentIndex(self.variant.findData("source"))
+        self.variant.currentIndexChanged.connect(self.change_view)
+        self.source = QPlainTextEdit()
+        self.source.setMaximumHeight(95)
+        self.target = QPlainTextEdit()
+        self.target.setMaximumHeight(95)
+        self.source.installEventFilter(self)
+        self.target.installEventFilter(self)
+        self.source.setUndoRedoEnabled(False)
+        self.target.setUndoRedoEnabled(False)
+        self.source.textChanged.connect(
+            lambda: self.region_value("source", self.source.toPlainText())
+        )
+        self.target.textChanged.connect(
+            lambda: self.region_value("target", self.target.toPlainText())
+        )
+        self.source_lock = QCheckBox("锁定原文")
+        self.target_lock = QCheckBox("锁定译文")
+        self.geometry_lock = QCheckBox("锁定区域")
+        self.source_lock.toggled.connect(
+            lambda v: self.region_value("source_locked", v)
+        )
+        self.target_lock.toggled.connect(
+            lambda v: self.region_value("target_locked", v)
+        )
+        self.geometry_lock.toggled.connect(
+            lambda v: self.region_value("geometry_locked", v)
+        )
+        self.font = QComboBox()
+        self.font.addItem("内置字体", "")
+        self.font.currentIndexChanged.connect(
+            lambda: self.style_value("font", self.font.currentData() or "")
+        )
+        self.size = QSpinBox()
+        self.size.setRange(6, 512)
+        self.size.setValue(28)
+        self.size.setFixedWidth(130)
+        self.size.setToolTip(
+            "手动修改字号会退出自动字号；重新勾选自动字号即可随框自动调整"
+        )
+        self.size.valueChanged.connect(lambda v: self.style_value("size", v))
+        self.minimum = QSpinBox()
+        self.minimum.setRange(6, 512)
+        self.minimum.setValue(10)
+        self.minimum.valueChanged.connect(lambda v: self.style_value("min_size", v))
+        self.autofit = QCheckBox("自动字号：随框放大或缩小")
+        self.autofit.setChecked(True)
+        self.autofit.toggled.connect(lambda v: self.style_value("autofit", v))
+        self.horizontal_button = TransparentPushButton("横")
+        self.horizontal_button.setCheckable(True)
+        self.horizontal_button.setToolTip("横排文字")
+        self.horizontal_button.clicked.connect(
+            lambda: self.style_value("vertical", False)
+        )
+        self.vertical_button = TransparentPushButton("竖")
+        self.vertical_button.setCheckable(True)
+        self.vertical_button.setToolTip("竖排文字")
+        self.vertical_button.clicked.connect(
+            lambda: self.style_value("vertical", True)
+        )
+        self.bold_button = TransparentPushButton("B")
+        self.bold_button.setCheckable(True)
+        self.bold_button.setToolTip("粗体")
+        self.bold_button.clicked.connect(
+            lambda checked: self.style_value("bold", checked)
+        )
+        self.color_button = TransparentToolButton(FluentIcon.PALETTE, self)
+        self.color_button.setToolTip("文字颜色")
+        self.color_button.clicked.connect(lambda: self.pick_color("color"))
+        self.align = QComboBox()
+        for title, value in [("左对齐", "left"), ("居中", "center"), ("右对齐", "right")]:
+            self.align.addItem(title, value)
+        self.align.currentIndexChanged.connect(
+            lambda: self.style_value("align", self.align.currentData())
+        )
+        self.spacing = QDoubleSpinBox()
+        self.spacing.setRange(0.5, 4)
+        self.spacing.setValue(1.2)
+        self.spacing.setSingleStep(0.1)
+        self.spacing.valueChanged.connect(
+            lambda v: self.style_value("line_spacing", v)
+        )
+        self.charspace = QSpinBox()
+        self.charspace.setRange(-10, 50)
+        self.charspace.valueChanged.connect(
+            lambda v: self.style_value("char_spacing", v)
+        )
+        self.stroke = QSpinBox()
+        self.stroke.setRange(0, 30)
+        self.stroke.valueChanged.connect(lambda v: self.style_value("stroke_width", v))
+        self.rotation = QSpinBox()
+        self.rotation.setRange(-180, 180)
+        self.rotation.valueChanged.connect(self.rotate)
+        self.removal = QComboBox()
+        for title, value in [
+            ("色块遮挡", "fill"),
+            ("精准去字（LaMa）", "precise"),
+            ("保留原文", "none"),
+        ]:
+            self.removal.addItem(title, value)
+        self.removal.hide()
+        self.removal.currentIndexChanged.connect(
+            lambda: self.region_value("removal", self.removal.currentData())
+        )
+        self.regions = QTableWidget()
+        self.regions.setColumnCount(3)
+        self.regions.setHorizontalHeaderLabels(["顺序", "OCR 原文 / 译文", "状态"])
+        self.regions.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.regions.setMinimumHeight(150)
+        self.regions.setWordWrap(True)
+        self.regions.setSelectionBehavior(QTableWidget.SelectRows)
+        self.regions.setColumnWidth(0, 60)
+        self.regions.setColumnWidth(2, 80)
+        self.regions.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.regions.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.regions.cellChanged.connect(self.review_changed)
+        self.regions.currentCellChanged.connect(
+            lambda row, col, old_row, old_col: self.region_row(row)
+        )
+        self.font_mode_hint = QLabel("选择文字框后显示实际字号")
+        self.font_mode_hint.setWordWrap(True)
+
+        # ---- 顶栏：返回 + 标题 + 模型与语言设置 ----
+        heading = QHBoxLayout()
+        back = TransparentPushButton(FluentIcon.RETURN, "返回", self.work_page)
+        back.clicked.connect(self.back_to_start)
+        heading.addWidget(back)
+        heading.addWidget(SubtitleLabel("漫画翻译", self.work_page))
+        heading.addSpacing(16)
+        heading.addWidget(QLabel("检测", self.work_page))
+        heading.addWidget(self.detector)
+        heading.addWidget(QLabel("OCR", self.work_page))
+        heading.addWidget(self.ocr)
+        heading.addWidget(QLabel("原文", self.work_page))
+        heading.addWidget(self.source_language)
+        heading.addWidget(QLabel("译文", self.work_page))
+        heading.addWidget(self.target_language)
+        heading.addStretch(1)
+        root.addLayout(heading)
+
+        # ---- 命令栏 ----
+        command_card = SimpleCardWidget(self.work_page)
+        commands = QHBoxLayout(command_card)
+        commands.setContentsMargins(10, 8, 10, 8)
+        commands.setSpacing(6)
+        root.addWidget(command_card)
         self.menu_button(
             commands,
             "文件",
@@ -553,19 +785,24 @@ class MangaPage(QWidget):
                 ("导入译文 JSON…", self.import_translation),
             ],
         )
-        self.menu_button(
+        detect_menu = self.menu_button(
             commands,
             "识别",
             [
                 ("识别当前页", lambda: self.ask_detection(0)),
+                ("识别全部页面", lambda: self.ask_detection(1)),
                 ("OCR 当前页", lambda: self.ask_ocr(0)),
+                ("OCR 全部页面", lambda: self.ask_ocr(1)),
             ],
         )
-        self.menu_button(
+        detect_menu.task_menu.addSeparator()
+        detect_menu.task_menu.addAction(self.overwrite_detect_action)
+        translate_menu = self.menu_button(
             commands,
             "翻译",
             [
                 ("翻译当前页", lambda: self.run("translate", scope=0)),
+                ("翻译全部页面", lambda: self.run("translate", scope=1)),
                 (
                     "术语表（公共）",
                     lambda: self.open_public_table("prompt_dictionary_page"),
@@ -580,6 +817,8 @@ class MangaPage(QWidget):
                 ),
             ],
         )
+        translate_menu.task_menu.addSeparator()
+        translate_menu.task_menu.addAction(self.overwrite_translate_action)
         self.menu_button(
             commands,
             "编辑",
@@ -651,36 +890,9 @@ class MangaPage(QWidget):
                 triggered=lambda: PunctuationRulesDialog(self).exec(),
             )
         )
-        self.reading_action = Action("显示阅读顺序", self)
-        self.reading_action.setCheckable(True)
-        self.reading_action.toggled.connect(
-            lambda checked: self.reading_panel.setVisible(checked)
-        )
-        layout_button.task_menu.addAction(self.reading_action)
         self.cancel_button = self.icon_button(
             commands, FluentIcon.CLOSE, "取消当前任务", self.cancel_job
         )
-        self.precise = QCheckBox("精准去字")
-        self.precise.setToolTip(
-            "整个工程统一：勾选使用 LaMa 修复背景，取消使用色块遮挡；原图始终保留"
-        )
-        self.precise.toggled.connect(self.toggle_precise)
-        self.overwrite = QCheckBox("重做已有识别 / 译文")
-        self.overwrite.setToolTip(
-            "通常关闭，保留人工校对；开启后可重做当前操作范围的结果"
-        )
-        self.variant = QComboBox()
-        for title, value in [
-            ("实时编辑", "edit"),
-            ("预览成品", "render"),
-            ("查看原图", "source"),
-            ("查看去字底图", "clean"),
-            ("查看蒙版", "mask"),
-            ("查看文字层", "layer"),
-        ]:
-            self.variant.addItem(title, value)
-        self.variant.setCurrentIndex(self.variant.findData("source"))
-        self.variant.currentIndexChanged.connect(self.change_view)
         for sequence, callback in [
             ("Ctrl+S", self.save),
             ("Ctrl+Z", self.undo.undo),
@@ -690,8 +902,11 @@ class MangaPage(QWidget):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(callback)
+
+        # ---- 三栏布局 ----
         split = QSplitter(Qt.Horizontal)
         root.addWidget(split, 1)
+        # 左：页面列表
         left = SimpleCardWidget()
         left.setBorderRadius(12)
         left.setMinimumWidth(64)
@@ -707,15 +922,20 @@ class MangaPage(QWidget):
         self.page_bar_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         page_bar = QHBoxLayout(self.page_bar_widget)
         page_bar.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(self.page_bar_widget)
         self.button(page_bar, "↑", lambda: self.move_page(-1))
         self.button(page_bar, "↓", lambda: self.move_page(1))
-        self.button(page_bar, "移除页", self.delete_page)
+        remove_page_button = TransparentToolButton(FluentIcon.DELETE, left)
+        remove_page_button.setToolTip("移除当前页")
+        remove_page_button.setAccessibleName("移除当前页")
+        remove_page_button.clicked.connect(self.delete_page)
+        page_bar.addWidget(remove_page_button)
+        left_layout.addWidget(self.page_bar_widget)
         split.addWidget(left)
         self.pages.currentRowChanged.connect(self.select_page)
         self.page_panel = left
         self.page_panel.installEventFilter(self)
         split.splitterMoved.connect(self.update_page_labels)
+        # 中：画布
         center = SimpleCardWidget()
         center.setBorderRadius(12)
         center_layout = QVBoxLayout(center)
@@ -757,13 +977,12 @@ class MangaPage(QWidget):
             self.geometry.addItem(title, key)
         self.geometry.hide()
         self.geometry.currentIndexChanged.connect(self.change_geometry)
-        self.geometry_hint = QLabel(
-            "拖框移动译文 · 拖右下角自动缩放文字 · 右键更多操作"
-        )
+        self.geometry_hint = QLabel("拖框移动 · 右下角缩放 · 右键操作")
         self.geometry_hint.setWordWrap(True)
         self.geometry_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         tools.addWidget(self.geometry_hint, 1)
         tools.addStretch(1)
+        tools.addWidget(self.precise)
         tools.addWidget(self.variant)
         self.brush = QSpinBox()
         self.brush.setRange(1, 256)
@@ -805,6 +1024,7 @@ class MangaPage(QWidget):
         self.canvas.deleteRequested.connect(self.delete_regions)
         self.canvas.contextRequested.connect(self.region_context_menu)
         self.canvas.modeRequested.connect(self.tool.setCurrentIndex)
+        # 右：处理设置 + 文字与排版（滚动），阅读顺序（固定在下）
         scroll = QScrollArea()
         scroll.setMinimumWidth(350)
         scroll.setMaximumWidth(480)
@@ -814,263 +1034,146 @@ class MangaPage(QWidget):
         right.setBorderRadius(12)
         form = QFormLayout(right)
         form.setContentsMargins(16, 16, 16, 16)
-        form.setVerticalSpacing(12)
+        form.setVerticalSpacing(10)
+        # ==== 处理设置 ====
         form.addRow(StrongBodyLabel("处理设置", right))
-        form.addRow(self.precise)
-        form.addRow(self.overwrite)
-        scroll.setWidget(right)
+        text_columns = QHBoxLayout()
+        text_columns.setSpacing(8)
+        source_column = QVBoxLayout()
+        source_column.addWidget(QLabel("选中的原文", right))
+        source_column.addWidget(self.source)
+        text_columns.addLayout(source_column)
+        target_column = QVBoxLayout()
+        target_column.addWidget(QLabel("选中的译文", right))
+        target_column.addWidget(self.target)
+        text_columns.addLayout(target_column)
+        form.addRow(text_columns)
+        lock_row = QHBoxLayout()
+        lock_row.addWidget(self.source_lock)
+        lock_row.addWidget(self.target_lock)
+        lock_row.addWidget(self.geometry_lock)
+        form.addRow(lock_row)
+        processing = QWidget(right)
+        processing_form = QFormLayout(processing)
+        processing_form.setContentsMargins(0, 0, 0, 0)
+        processing_form.addRow("检测阈值", self.confidence)
+        processing_form.addRow(self.panels)
+        processing_form.addRow(self.rtl)
+        processing_form.addRow(self.auto_recognize)
+        processing_form.addRow("翻译接口", self.provider)
+        processing.setVisible(False)
+        processing_toggle = QPushButton("高级处理选项")
+        processing_toggle.setCheckable(True)
+        processing_toggle.toggled.connect(processing.setVisible)
+        form.addRow(processing_toggle)
+        form.addRow(processing)
         right.setAutoFillBackground(False)
-        scroll.viewport().setAutoFillBackground(False)
         right_split = QSplitter(Qt.Vertical)
         right_split.setMinimumWidth(350)
         right_split.setMaximumWidth(480)
         right_split.addWidget(scroll)
         split.addWidget(right_split)
-        outer_form = form
-        processing = QWidget(right)
-        processing_form = QFormLayout(processing)
-        processing_form.setContentsMargins(0, 0, 0, 0)
-        processing_toggle = QPushButton("展开识别模型与语言设置")
-        processing_toggle.setCheckable(True)
-        processing_toggle.toggled.connect(processing.setVisible)
-        processing_toggle.toggled.connect(
-            lambda checked: processing_toggle.setText(
-                "收起识别模型与语言设置" if checked else "展开识别模型与语言设置"
-            )
-        )
-        form.addRow(processing_toggle)
-        form.addRow(processing)
-        processing.hide()
-        form = processing_form
-        self.detector = QComboBox()
-        self.detector.addItems(["manga-panel", "legacy-balloon-yolov4"])
-        self.ocr = QComboBox()
-        self.ocr.addItems(["mangaocr", "rapidocr"])
-        form.addRow("检测模型", self.detector)
-        form.addRow("OCR模型", self.ocr)
-        self.detector.currentTextChanged.connect(
-            lambda v: self.set_setting("detector", v)
-        )
-        self.ocr.currentTextChanged.connect(lambda v: self.set_setting("ocr", v))
-        self.panels = QCheckBox("检测分镜并组织阅读顺序")
-        self.panels.setChecked(True)
-        form.addRow(self.panels)
-        self.panels.toggled.connect(lambda v: self.set_setting("detect_panels", v))
-        self.source_language = QComboBox()
-        self.source_language.addItems(["ja", "zh", "en", "ko"])
-        form.addRow("原文语言", self.source_language)
-        self.target_language = QComboBox()
-        self.target_language.addItems(["zh-CN", "en", "ja", "ko"])
-        form.addRow("目标语言", self.target_language)
-        self.source_language.currentTextChanged.connect(
-            lambda v: self.set_setting("source_language", v)
-        )
-        self.target_language.currentTextChanged.connect(
-            lambda v: self.set_setting("target_language", v)
-        )
-        self.confidence = QDoubleSpinBox()
-        self.confidence.setRange(0.05, 1)
-        self.confidence.setSingleStep(0.05)
-        self.confidence.setValue(0.5)
-        form.addRow("检测阈值", self.confidence)
-        self.confidence.valueChanged.connect(
-            lambda v: self.set_setting("confidence", v)
-        )
-        self.rtl = QCheckBox("从右向左阅读")
-        self.rtl.setChecked(True)
-        form.addRow(self.rtl)
-        self.rtl.toggled.connect(lambda v: self.set_setting("right_to_left", v))
-        self.auto_recognize = QCheckBox("导入后自动检测与 OCR")
-        self.auto_recognize.setChecked(True)
-        form.addRow(self.auto_recognize)
-        self.auto_recognize.toggled.connect(
-            lambda v: self.set_setting("auto_recognize", v)
-        )
-        self.provider = QComboBox()
-        self.provider.addItem("使用文本翻译当前接口", None)
-        form.addRow("翻译接口", self.provider)
-        self.provider.currentIndexChanged.connect(
-            lambda: self.set_setting("provider_id", self.provider.currentData())
-        )
-        self.regions = QTableWidget()
-        self.regions.setColumnCount(3)
-        self.regions.setHorizontalHeaderLabels(["顺序", "OCR 原文 / 译文", "状态"])
-        self.regions.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.regions.setMinimumHeight(150)
-        self.regions.setWordWrap(True)
-        self.regions.setSelectionBehavior(QTableWidget.SelectRows)
-        self.regions.setColumnWidth(0, 60)
+        # ==== 阅读顺序（本页的原文列表）====
+        review = SimpleCardWidget()
+        self.reading_panel = review
+        review_layout = QVBoxLayout(review)
+        review_layout.addWidget(StrongBodyLabel("本页的原文列表 · 阅读顺序", review))
+        self.regions.setMinimumHeight(180)
+        self.regions.setColumnWidth(0, 40)
         self.regions.setColumnWidth(2, 80)
-        self.regions.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.regions.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
-        self.regions.cellChanged.connect(self.review_changed)
-        self.regions.currentCellChanged.connect(
-            lambda row, col, old_row, old_col: self.region_row(row)
-        )
+        review_layout.addWidget(self.regions)
         reorder = QHBoxLayout()
         self.button(reorder, "上移框", lambda: self.move_region(-1))
         self.button(reorder, "下移框", lambda: self.move_region(1))
         self.button(reorder, "合并框", self.merge_regions)
         self.button(reorder, "拆分框", self.split_region)
-
-        form = outer_form
-        form.addRow(StrongBodyLabel("文字与排版", right))
-        self.source = QPlainTextEdit()
-        self.source.setMaximumHeight(95)
-        self.target = QPlainTextEdit()
-        self.target.setMaximumHeight(95)
-        form.addRow("OCR原文", self.source)
-        form.addRow("译文", self.target)
-        self.source.installEventFilter(self)
-        self.target.installEventFilter(self)
-        self.source.setUndoRedoEnabled(False)
-        self.target.setUndoRedoEnabled(False)
-        self.source.textChanged.connect(
-            lambda: self.region_value("source", self.source.toPlainText())
-        )
-        self.target.textChanged.connect(
-            lambda: self.region_value("target", self.target.toPlainText())
-        )
-        self.source_lock = QCheckBox("锁定原文")
-        self.target_lock = QCheckBox("锁定译文")
-        form.addRow(self.source_lock, self.target_lock)
-        self.source_lock.toggled.connect(
-            lambda v: self.region_value("source_locked", v)
-        )
-        self.target_lock.toggled.connect(
-            lambda v: self.region_value("target_locked", v)
-        )
-        self.geometry_lock = QCheckBox("锁定区域")
-        form.addRow(self.geometry_lock)
-        self.geometry_lock.toggled.connect(
-            lambda v: self.region_value("geometry_locked", v)
-        )
-        self.font = QComboBox()
-        self.font.addItem("内置字体", "")
-        form.addRow("字体", self.font)
-        self.font.currentIndexChanged.connect(
-            lambda: self.style_value("font", self.font.currentData() or "")
-        )
-        self.button(form, "添加字体文件", self.pick_font)
-        self.size = QSpinBox()
-        self.size.setRange(6, 512)
-        self.size.setValue(28)
-        form.addRow("字号", self.size)
-        self.size.valueChanged.connect(lambda v: self.style_value("size", v))
-        self.minimum = QSpinBox()
-        self.minimum.setRange(6, 512)
-        self.minimum.setValue(10)
-        form.addRow("建议字号下限", self.minimum)
-        self.minimum.valueChanged.connect(lambda v: self.style_value("min_size", v))
-        self.autofit = QCheckBox("自动字号：随框放大或缩小")
-        self.autofit.setChecked(True)
-        form.addRow(self.autofit)
-        self.autofit.toggled.connect(lambda v: self.style_value("autofit", v))
-        self.vertical = QCheckBox("竖排")
-        self.bold = QCheckBox("粗体")
-        form.addRow(self.vertical, self.bold)
-        self.vertical.toggled.connect(lambda v: self.style_value("vertical", v))
-        self.bold.toggled.connect(lambda v: self.style_value("bold", v))
-        self.spacing = QDoubleSpinBox()
-        self.spacing.setRange(0.5, 4)
-        self.spacing.setValue(1.2)
-        self.spacing.setSingleStep(0.1)
-        form.addRow("行距", self.spacing)
-        self.spacing.valueChanged.connect(lambda v: self.style_value("line_spacing", v))
-        self.charspace = QSpinBox()
-        self.charspace.setRange(-10, 50)
-        form.addRow("字距", self.charspace)
-        self.charspace.valueChanged.connect(
-            lambda v: self.style_value("char_spacing", v)
-        )
-        self.stroke = QSpinBox()
-        self.stroke.setRange(0, 30)
-        form.addRow("描边宽度", self.stroke)
-        self.stroke.valueChanged.connect(lambda v: self.style_value("stroke_width", v))
-        colors = QHBoxLayout()
-        self.button(colors, "文字颜色", lambda: self.pick_color("color"))
-        self.button(colors, "描边颜色", lambda: self.pick_color("stroke_color"))
-        form.addRow(colors)
-        self.align = QComboBox()
-        self.align.addItems(["left", "center", "right"])
-        form.addRow("对齐", self.align)
-        self.align.currentTextChanged.connect(lambda v: self.style_value("align", v))
-        self.rotation = QSpinBox()
-        self.rotation.setRange(-180, 180)
-        form.addRow("旋转角度", self.rotation)
-        self.rotation.valueChanged.connect(self.rotate)
-        self.removal = QComboBox()
-        for title, value in [
-            ("色块遮挡", "fill"),
-            ("精准去字（LaMa）", "precise"),
-            ("保留原文", "none"),
-        ]:
-            self.removal.addItem(title, value)
-        self.removal.hide()
-        self.removal.currentIndexChanged.connect(
-            lambda: self.region_value("removal", self.removal.currentData())
-        )
-        self.button(form, "指定遮挡颜色", lambda: self.pick_color("fill_color", False))
-        self.button(
-            form, "自动取背景色", lambda: self.region_value("fill_color", "auto")
-        )
-        self.button(form, "样式应用到本页", lambda: self.apply_style(False))
-        self.button(form, "样式应用到全部页", lambda: self.apply_style(True))
-        # Keep the most-used typography controls visible before the long form.
-        for widget in (self.font, self.size, self.autofit):
-            row, _ = form.getWidgetPosition(widget)
-            removed = form.takeRow(row)
-            if removed.labelItem and removed.labelItem.widget():
-                removed.labelItem.widget().hide()
-                removed.labelItem.widget().deleteLater()
-        typography = QHBoxLayout()
-        typography.addWidget(self.font, 1)
-        self.size.setFixedWidth(130)
-        self.size.setToolTip(
-            "手动修改字号会退出自动字号；重新勾选自动字号即可随框自动调整"
-        )
-        typography.addWidget(self.size)
-        row, _ = form.getWidgetPosition(self.source)
-        form.insertRow(row, "字体 / 字号", typography)
-        form.insertRow(row + 1, self.autofit)
-        self.font_mode_hint = QLabel("选择文字框后显示实际字号")
-        self.font_mode_hint.setWordWrap(True)
-        form.insertRow(row + 2, self.font_mode_hint)
-        review = SimpleCardWidget()
-        self.reading_panel = review
-        review_layout = QVBoxLayout(review)
-        review_layout.addWidget(StrongBodyLabel("阅读顺序 · 原文 / 译文 / 状态"))
-        self.regions.setMinimumHeight(180)
-        self.regions.setColumnWidth(0, 40)
-        self.regions.setColumnWidth(2, 80)
-        review_layout.addWidget(self.regions)
         review_layout.addLayout(reorder)
         right_split.addWidget(review)
         right_split.setSizes([500, 260])
-        review.hide()
+        # ==== 文字与排版（第二张卡）====
+        typography_card = SimpleCardWidget()
+        typography_card.setBorderRadius(12)
+        typography_form = QFormLayout(typography_card)
+        typography_form.setContentsMargins(16, 16, 16, 16)
+        typography_form.setVerticalSpacing(10)
+        typography_form.addRow(StrongBodyLabel("文字与排版", typography_card))
+        typography = QHBoxLayout()
+        typography.addWidget(self.font, 1)
+        typography.addWidget(self.size)
+        typography_form.addRow(typography)
+        common_row = QHBoxLayout()
+        common_row.setSpacing(4)
+        common_row.addWidget(self.horizontal_button)
+        common_row.addWidget(self.vertical_button)
+        common_row.addWidget(self.bold_button)
+        common_row.addWidget(self.color_button)
+        self.align.setFixedWidth(96)
+        common_row.addWidget(self.align)
+        typography_form.addRow(common_row)
+        typography_form.addRow(self.font_mode_hint)
+        advanced = QWidget(typography_card)
+        advanced_form = QFormLayout(advanced)
+        advanced_form.setContentsMargins(0, 0, 0, 0)
+        advanced_form.addRow("建议字号下限", self.minimum)
+        advanced_form.addRow("行距", self.spacing)
+        advanced_form.addRow("字距", self.charspace)
+        advanced_form.addRow("描边宽度", self.stroke)
+        advanced_form.addRow("旋转角度", self.rotation)
+        fill_row = QHBoxLayout()
+        self.button(
+            fill_row, "指定遮挡颜色", lambda: self.pick_color("fill_color", False)
+        )
+        self.button(
+            fill_row, "自动取背景色", lambda: self.region_value("fill_color", "auto")
+        )
+        advanced_form.addRow(fill_row)
+        style_row = QHBoxLayout()
+        self.button(style_row, "样式应用到本页", lambda: self.apply_style(False))
+        self.button(style_row, "样式应用到全部页", lambda: self.apply_style(True))
+        advanced_form.addRow(style_row)
+        advanced.setVisible(False)
+        advanced_toggle = QPushButton("高级排版选项")
+        advanced_toggle.setCheckable(True)
+        advanced_toggle.toggled.connect(advanced.setVisible)
+        typography_form.addRow(advanced_toggle)
+        typography_form.addRow(advanced)
+        # 两张卡放进同一个滚动容器
+        right_container = QWidget()
+        right_container_layout = QVBoxLayout(right_container)
+        right_container_layout.setContentsMargins(0, 0, 0, 0)
+        right_container_layout.setSpacing(12)
+        right_container_layout.addWidget(right)
+        right_container_layout.addWidget(typography_card)
+        right_container_layout.addStretch(1)
+        right_container.setAutoFillBackground(False)
+        scroll.viewport().setAutoFillBackground(False)
+        scroll.setWidget(right_container)
         # QFormLayout creates plain QLabel objects from strings. Replace those
         # labels so they participate in Fluent's light/dark text styling too.
-        for row in range(form.rowCount()):
-            item = form.itemAt(row, QFormLayout.LabelRole)
-            label = item.widget() if item else None
-            if isinstance(label, NativeLabel) and not isinstance(label, QLabel):
-                replacement = QLabel(label.text(), right)
-                form.removeWidget(label)
-                label.hide()
-                label.deleteLater()
-                form.setWidget(row, QFormLayout.LabelRole, replacement)
+        for target_form, host in ((form, right), (typography_form, typography_card)):
+            for row in range(target_form.rowCount()):
+                item = target_form.itemAt(row, QFormLayout.LabelRole)
+                label = item.widget() if item else None
+                if isinstance(label, NativeLabel) and not isinstance(label, QLabel):
+                    replacement = QLabel(label.text(), host)
+                    target_form.removeWidget(label)
+                    label.hide()
+                    label.deleteLater()
+                    target_form.setWidget(row, QFormLayout.LabelRole, replacement)
         split.setSizes([160, 900, 380])
+        # ==== 任务进度面板（画布右下角浮动，随时可取消）====
         self.progress_label = QLabel("尚未开始翻译")
         self.progress_label.setWordWrap(True)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_panel = QWidget()
+        self.progress_panel = SimpleCardWidget(self.canvas.viewport())
         progress_row = QHBoxLayout(self.progress_panel)
-        progress_row.setContentsMargins(0, 0, 0, 0)
-        progress_row.addWidget(self.progress_label, 2)
+        progress_row.setContentsMargins(12, 8, 12, 8)
+        progress_row.setSpacing(8)
+        progress_row.addWidget(self.progress_label, 1)
         progress_row.addWidget(self.progress_bar, 1)
-        root.addWidget(self.progress_panel)
+        progress_row.addWidget(self.cancel_button)
         self.progress_panel.hide()
         self.last_report = {}
         self.failed_region_ids = []
@@ -1314,6 +1417,14 @@ class MangaPage(QWidget):
         )
         self.zoom_overlay.raise_()
 
+    def position_progress_panel(self):
+        self.progress_panel.adjustSize()
+        self.progress_panel.move(
+            max(0, self.canvas.viewport().width() - self.progress_panel.width() - 10),
+            max(0, self.canvas.viewport().height() - self.progress_panel.height() - 10),
+        )
+        self.progress_panel.raise_()
+
     def show_layout_size(self, region_id, info):
         if region_id == self.selected and self.region():
             mode = "自动字号" if self.region()["style"]["autofit"] else "手动字号"
@@ -1329,6 +1440,11 @@ class MangaPage(QWidget):
             self.run("render", scope=0)
         else:
             self.load_image()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self.progress_panel.isHidden():
+            self.position_progress_panel()
 
     def eventFilter(self, watched, event):
         if (
@@ -1604,6 +1720,17 @@ class MangaPage(QWidget):
 
         self.background(lambda: self.client.request("GET"), loaded)
 
+    def refresh_fonts(self):
+        def loaded_fonts(result):
+            self.font.blockSignals(True)
+            self.font.clear()
+            self.font.addItem("内置字体", "")
+            for path in result.get("fonts", []):
+                self.font.addItem(Path(path).name, path)
+            self.font.blockSignals(False)
+
+        self.background(lambda: self.client.request("GET", "/fonts"), loaded_fonts)
+
     def refresh_providers(self):
         def loaded(result):
             self.provider.blockSignals(True)
@@ -1831,8 +1958,8 @@ class MangaPage(QWidget):
             self.size,
             self.minimum,
             self.autofit,
-            self.vertical,
-            self.bold,
+            self.vertical_button,
+            self.bold_button,
             self.spacing,
             self.charspace,
             self.stroke,
@@ -1867,8 +1994,8 @@ class MangaPage(QWidget):
             (self.stroke, "stroke_width"),
         ]:
             widget.setValue(s[key])
-        self.vertical.setChecked(s["vertical"])
-        self.bold.setChecked(s["bold"])
+        self.vertical_button.setChecked(s["vertical"])
+        self.bold_button.setChecked(s["bold"])
         self.autofit.setChecked(s["autofit"])
         self.align.setCurrentText(s["align"])
         if s["font"] and self.font.findData(s["font"]) < 0:
@@ -1879,6 +2006,10 @@ class MangaPage(QWidget):
         self.punctuation_action.blockSignals(True)
         self.punctuation_action.setChecked(s.get("auto_punctuation", False))
         self.punctuation_action.blockSignals(False)
+        self.horizontal_button.setChecked(not s["vertical"])
+        self.vertical_button.setChecked(s["vertical"])
+        self.bold_button.setChecked(s["bold"])
+        self.align.setCurrentIndex(self.align.findData(s["align"]))
         self.loading_form = False
 
     def draw_canvas(self):
@@ -2018,9 +2149,9 @@ class MangaPage(QWidget):
         self.canvas.rect_key = self.geometry.currentData()
         self.geometry_hint.setText(
             {
-                "layout_rect": "拖框移动译文 · 拖右下角自动缩放文字 · 右键更多操作",
-                "ocr_rect": "高级：仅修改 OCR 从哪里读取原文（不移动译文）",
-                "erase_rect": "高级：仅修改去除原文的背景范围（不移动译文）",
+                "layout_rect": "拖框移动 · 右下角缩放 · 右键操作",
+                "ocr_rect": "高级：仅修改 OCR 取字范围（不动译文）",
+                "erase_rect": "高级：仅修改去字背景范围（不动译文）",
             }[self.canvas.rect_key]
         )
         self.draw_canvas()
@@ -2103,6 +2234,11 @@ class MangaPage(QWidget):
             self.edit("修改文字框", action)
 
     def style_value(self, key, value):
+        if self.region() and self.variant.currentData() not in ("edit",):
+            self.variant.blockSignals(True)
+            self.variant.setCurrentIndex(self.variant.findData("edit"))
+            self.variant.blockSignals(False)
+            self.load_image()
         if self.region():
 
             def action():
@@ -2389,49 +2525,59 @@ class MangaPage(QWidget):
     def import_images(self, checked=False, folder=False):
         if self.job_id or self.submitting or not self.prepare_to_leave():
             return
-        dialog = MixedImportDialog(self)
-        paths = dialog.paths if dialog.exec() == QDialog.Accepted else []
-        if not paths:
+        if folder:
+            path = QFileDialog.getExistingDirectory(self, "导入文件夹")
+            if not path:
+                return
+            self.import_paths([path])
             return
-        self.import_paths(paths)
+        paths = pick_image_paths(self)
+        if paths:
+            self.import_paths(paths)
 
     def import_paths(self, paths):
         if not paths or self.job_id or self.submitting or not self.prepare_to_leave():
             return
-        append = (
-            self.document is not None
-            and QMessageBox.question(
-                self,
-                "导入图片",
-                "追加到当前工程？选择“否”将新建工程。",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            == QMessageBox.Yes
-        )
+        default_name = ""
+        if not self.document:
+            first = Path(paths[0])
+            default_name = first.stem if first.is_file() else first.name
+        dialog = ImportDialog(self, len(paths), default_name)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        settings = deepcopy(self.document["settings"]) if self.document else {
+            "detector": self.detector.currentText(),
+            "ocr": self.ocr.currentText(),
+            "source_language": dialog.source_language.currentData(),
+            "target_language": dialog.target_language.currentData(),
+            "confidence": self.confidence.value(),
+            "right_to_left": self.rtl.isChecked(),
+            "detect_panels": self.panels.isChecked(),
+            "auto_recognize": self.auto_recognize.isChecked(),
+        }
+        for key in ("source_language", "target_language"):
+            value = getattr(self, key).currentData()
+            if value:
+                settings[key] = value
         payload = {
             "paths": paths,
-            "settings": self.document["settings"]
-            if self.document
-            else {
-                "detector": self.detector.currentText(),
-                "ocr": self.ocr.currentText(),
-                "source_language": self.source_language.currentText(),
-                "target_language": self.target_language.currentText(),
-                "confidence": self.confidence.value(),
-                "right_to_left": self.rtl.isChecked(),
-                "detect_panels": self.panels.isChecked(),
-                "auto_recognize": self.auto_recognize.isChecked(),
-            },
+            "title": dialog.name_edit.text().strip() or None,
+            "settings": settings,
         }
-        if append:
-            payload["workspace_id"] = self.document["id"]
 
         def imported(result):
             self.loaded(result["workspace"])
             self.refresh_history()
-            if self.document["settings"].get("auto_recognize"):
-                self.follow_progress = True
-                self.run("recognize")
+            if not any(p["regions"] for p in self.document["pages"]):
+                answer = QMessageBox.question(
+                    self,
+                    "开始识别",
+                    "导入完成。要立即检测文字框并读取原文吗？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if answer == QMessageBox.Yes:
+                    self.run("recognize", scope=1)
 
         self.start_request(
             lambda: self.client.request(
@@ -2441,14 +2587,31 @@ class MangaPage(QWidget):
         )
 
     def run(
-        self, stage, saved=False, preview=False, scope=None, region_ids=None, after=None
+        self,
+        stage,
+        saved=False,
+        preview=False,
+        scope=None,
+        region_ids=None,
+        after=None,
+        replace=None,
     ):
         if not self.document or self.job_id or self.submitting:
             return
         if not saved:
-            self.save(lambda: self.run(stage, True, preview, scope, region_ids, after))
+            self.save(
+                lambda: self.run(
+                    stage, True, preview, scope, region_ids, after, replace
+                )
+            )
             return
         scope = 0 if preview else self.scope.currentIndex() if scope is None else scope
+        if replace is None:
+            replace = (
+                self.overwrite_detect_action.isChecked()
+                if stage in {"detect", "ocr", "recognize"}
+                else self.overwrite_translate_action.isChecked()
+            ) or region_ids is not None
         pages = [] if scope == 1 else [self.page_id]
         regions = (
             list(region_ids)
@@ -2462,7 +2625,6 @@ class MangaPage(QWidget):
         if scope == 2 and not regions:
             self.status.setText("请先选中文字框")
             return
-        replace = self.overwrite.isChecked() or region_ids is not None
         if (
             stage == "detect"
             and replace
@@ -2541,7 +2703,9 @@ class MangaPage(QWidget):
         self.status.setText("正在提交任务…")
         self.progress_label.setText("正在提交任务…")
         self.progress_bar.setRange(0, 0)
+        self.cancel_button.show()
         self.progress_panel.show()
+        self.position_progress_panel()
 
         def started(result):
             if session != self.session:

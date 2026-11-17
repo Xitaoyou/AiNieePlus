@@ -3,7 +3,7 @@
 import json
 from io import BytesIO
 
-from PyQt5.QtCore import QRectF, Qt, pyqtSignal
+from PyQt5.QtCore import QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QGraphicsItem,
@@ -51,7 +51,13 @@ class RegionItem(QGraphicsRectItem):
                     key[1],
                     punctuation_rules=self.canvas.punctuation_rules,
                 )
-                self.canvas.layoutMeasured.emit(self.region["id"], self.layout_info)
+                # 延迟到事件循环：draw_canvas 期间 blockSignals 会吞掉本信号
+                QTimer.singleShot(
+                    0,
+                    lambda rid=self.region["id"], info=self.layout_info: self.canvas.layoutMeasured.emit(
+                        rid, info
+                    ),
+                )
                 self.setToolTip(
                     "公共替换规则存在无效正则，已跳过，请在文本替换表修正"
                     if self.layout_info.get("invalid_rules")
