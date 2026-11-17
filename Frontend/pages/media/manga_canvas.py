@@ -1,5 +1,8 @@
 """Native Qt geometry and mask interaction, always in original-image coordinates."""
 
+import json
+from io import BytesIO
+
 from PyQt5.QtCore import QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
@@ -9,6 +12,8 @@ from PyQt5.QtWidgets import (
     QGraphicsView,
 )
 from qfluentwidgets import isDarkTheme, qconfig
+
+from Shared.manga_lettering import render_text
 
 
 class RegionItem(QGraphicsRectItem):
@@ -24,6 +29,31 @@ class RegionItem(QGraphicsRectItem):
         self.resizing = False
 
     def paint(self, painter, option, widget=None):
+        if (
+            self.canvas.live_layout
+            and self.rect_key == "layout_rect"
+            and self.region.get("target")
+        ):
+            key = (
+                self.rect().width(),
+                self.rect().height(),
+                self.region["target"],
+                json.dumps(self.region["style"], sort_keys=True),
+                self.region["layout_rect"].get("rotation", 0),
+            )
+            if getattr(self, "text_key", None) != key:
+                tile, self.layout_info = render_text(self.region, key[0], key[1])
+                self.setToolTip(
+                    "字体文件不可用，预览使用内置字体，请重新选择字体"
+                    if self.layout_info.get("font_missing")
+                    else "拖动移动译文；右下角缩放并自动适应文字；右键更多操作"
+                )
+                buffer = BytesIO()
+                tile.save(buffer, "PNG")
+                self.text_pixmap = QPixmap()
+                self.text_pixmap.loadFromData(buffer.getvalue())
+                self.text_key = key
+            painter.drawPixmap(0, 0, self.text_pixmap)
         painter.setPen(QPen(QColor("#ffbc42" if self.isSelected() else "#25b9e8"), 2))
         painter.drawRect(self.rect())
         painter.drawText(
@@ -95,6 +125,8 @@ class MangaCanvas(QGraphicsView):
     boxCreated = pyqtSignal(dict)
     strokeCreated = pyqtSignal(dict)
     deleteRequested = pyqtSignal()
+    contextRequested = pyqtSignal(str, object)
+    modeRequested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -112,6 +144,8 @@ class MangaCanvas(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.pan_origin = None
         self.box_preview = None
+        self.live_layout = False
+        self.persisted_lines = []
 
     def apply_theme(self, *_):
         background = "#17191c" if isDarkTheme() else "#eef1f6"
@@ -129,6 +163,7 @@ class MangaCanvas(QGraphicsView):
             self.pixmap_item = self.scene().addPixmap(QPixmap())
             self.box_preview = None
             self.lines = []
+            self.persisted_lines = []
         self.display_page = page["id"]
         from PyQt5 import sip
 
@@ -158,16 +193,40 @@ class MangaCanvas(QGraphicsView):
                 item.setFlag(
                     QGraphicsItem.ItemIsMovable, not region.get("geometry_locked")
                 )
+            item.update()
             item.setSelected(
                 region["id"] in (selected if isinstance(selected, list) else [selected])
             )
+        for line in self.persisted_lines:
+            if not sip.isdeleted(line) and line.scene() is self.scene():
+                self.scene().removeItem(line)
+        self.persisted_lines = []
+        if self.mode in {"mask", "eraser"}:
+            for region in page["regions"]:
+                if region["id"] not in (selected or []):
+                    continue
+                for stroke in region.get("mask_strokes", []):
+                    points = stroke["points"]
+                    pen = QPen(
+                        QColor(80, 150, 250, 150)
+                        if stroke["erase"]
+                        else QColor(250, 80, 80, 110),
+                        stroke["radius"] * 2,
+                    )
+                    pen.setCapStyle(Qt.RoundCap)
+                    pairs = list(zip(points, points[1:])) or [(points[0], points[0])]
+                    for start, end in pairs:
+                        line = self.scene().addLine(
+                            start[0], start[1], end[0], end[1], pen
+                        )
+                        line.setZValue(3)
+                        self.persisted_lines.append(line)
         if fit:
             self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
 
     def selection_changed(self):
         items = [i for i in self.scene().selectedItems() if isinstance(i, RegionItem)]
-        if items:
-            self.regionSelected.emit(items[0].region["id"])
+        self.regionSelected.emit(items[0].region["id"] if items else "")
 
     def selected_ids(self):
         return [
@@ -180,6 +239,17 @@ class MangaCanvas(QGraphicsView):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         if 0.02 < self.transform().m11() * factor < 30:
             self.scale(factor, factor)
+
+    def contextMenuEvent(self, event):
+        item = self.itemAt(event.pos())
+        if isinstance(item, RegionItem):
+            if not item.isSelected():
+                self.scene().clearSelection()
+                item.setSelected(True)
+            self.contextRequested.emit(item.region["id"], event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MiddleButton:
@@ -258,6 +328,8 @@ class MangaCanvas(QGraphicsView):
                         }
                     )
             elif self.mode in {"mask", "eraser"}:
+                self.start = None
+                self.clear_stroke_preview()
                 self.strokeCreated.emit(
                     {
                         "points": self.points,
@@ -270,9 +342,21 @@ class MangaCanvas(QGraphicsView):
         super().mouseReleaseEvent(event)
         self.setDragMode(QGraphicsView.RubberBandDrag)
 
+    def clear_stroke_preview(self):
+        from PyQt5 import sip
+
+        for line in self.lines:
+            if not sip.isdeleted(line) and line.scene() is self.scene():
+                self.scene().removeItem(line)
+        self.lines = []
+
     def keyPressEvent(self, event):
+        if event.key() in {Qt.Key_V, Qt.Key_B} and not event.modifiers():
+            self.modeRequested.emit(0 if event.key() == Qt.Key_V else 1)
+            return
         if event.key() == Qt.Key_Escape:
             self.start = None
+            self.clear_stroke_preview()
             if self.box_preview is not None:
                 self.scene().removeItem(self.box_preview)
                 self.box_preview = None

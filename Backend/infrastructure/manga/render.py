@@ -1,10 +1,12 @@
 """Shared Pillow lettering and lossless layered erasure for preview and export."""
 
-from pathlib import Path
 import math
 import os
+from pathlib import Path
+
 import numpy as np
-from PIL import Image, ImageColor, ImageDraw, ImageFont
+from PIL import Image, ImageColor
+
 from Backend.application.pipeline_common import PipelineError
 
 
@@ -105,6 +107,7 @@ def text_mask(image, page):
 
 def clean_page(source, page, models):
     import cv2
+
     from Backend.infrastructure.manga.engines import session
 
     original = np.asarray(source.convert("RGB")).copy()
@@ -173,123 +176,29 @@ def clean_page(source, page, models):
 
 
 def lettering(page, canvas_size):
+    from Shared.manga_lettering import render_text
+
     layer = Image.new("RGBA", canvas_size)
     warnings = []
     for region in sorted(page.regions, key=lambda r: r.order):
         if not region.target:
             continue
-        r, style = region.layout_rect, region.style
-        width, height = max(1, round(r.width)), max(1, round(r.height))
-        font_path = resolve_font(style.font)
-        size = style.size
-
-        def arrange(size):
-            font = ImageFont.truetype(font_path, size)
-            if style.vertical:
-                per_column = max(
-                    1,
-                    int(
-                        (height - 2 * style.padding) / max(1, size + style.char_spacing)
-                    ),
-                )
-                columns = []
-                for paragraph in region.target.split("\n"):
-                    columns.extend(
-                        paragraph[i : i + per_column]
-                        for i in range(0, len(paragraph), per_column)
-                    )
-                return (
-                    font,
-                    columns,
-                    len(columns) * size * style.line_spacing,
-                    max((len(c) for c in columns), default=0)
-                    * (size + style.char_spacing),
-                )
-            lines = []
-            for paragraph in region.target.split("\n"):
-                line = ""
-                for char in paragraph:
-                    if line and font.getlength(line + char) + len(
-                        line
-                    ) * style.char_spacing > max(1, width - 2 * style.padding):
-                        lines.append(line)
-                        line = ""
-                    line += char
-                lines.append(line)
-            return (
-                font,
-                lines,
-                max(
-                    (
-                        font.getlength(s) + max(0, len(s) - 1) * style.char_spacing
-                        for s in lines
-                    ),
-                    default=0,
-                ),
-                len(lines) * size * style.line_spacing,
-            )
-
-        while True:
-            font, lines, tw, th = arrange(size)
-            if (
-                not style.autofit
-                or (
-                    tw <= width - 2 * style.padding and th <= height - 2 * style.padding
-                )
-                or size <= style.min_size
-            ):
-                break
-            size -= 1
-        if tw > width - 2 * style.padding or th > height - 2 * style.padding:
+        tile, info = render_text(
+            region.model_dump(), font_path=resolve_font(region.style.font)
+        )
+        if info["overflow"] or info["below_minimum"]:
             warnings.append(
                 {
                     "region_id": region.id,
-                    "code": "TEXT_OVERFLOW",
-                    "message": "译文超出排版框，请调整字号或框大小",
+                    "code": "TEXT_OVERFLOW" if info["overflow"] else "TEXT_SMALL",
+                    "message": "固定字号超出框，请启用自动适应"
+                    if info["overflow"]
+                    else f"文字已适应框，实际字号 {info['font_size']}；建议扩大文字框",
                 }
             )
-        tile = Image.new("RGBA", (width, height))
-        draw = ImageDraw.Draw(tile)
-        stroke = style.stroke_width + (1 if style.bold else 0)
-        common = dict(
-            font=font,
-            fill=style.color,
-            stroke_width=stroke,
-            stroke_fill=style.stroke_color if style.stroke_width else style.color,
+        layer.alpha_composite(
+            tile, (round(region.layout_rect.x), round(region.layout_rect.y))
         )
-        if style.vertical:
-            for column, line in enumerate(lines):
-                x = width - style.padding - size - column * size * style.line_spacing
-                for i, char in enumerate(line):
-                    draw.text(
-                        (x, style.padding + i * (size + style.char_spacing)),
-                        char,
-                        **common,
-                    )
-        else:
-            for i, line in enumerate(lines):
-                length = (
-                    font.getlength(line) + max(0, len(line) - 1) * style.char_spacing
-                )
-                x = (
-                    style.padding
-                    if style.align == "left"
-                    else (width - length) / 2
-                    if style.align == "center"
-                    else width - length - style.padding
-                )
-                y = (
-                    max(style.padding, (height - th) / 2)
-                    + i * size * style.line_spacing
-                )
-                for char in line:
-                    draw.text((x, y), char, **common)
-                    x += font.getlength(char) + style.char_spacing
-        if r.rotation:
-            tile = tile.rotate(
-                -r.rotation, resample=Image.Resampling.BICUBIC, expand=False
-            )
-        layer.alpha_composite(tile, (round(r.x), round(r.y)))
     return layer, warnings
 
 
@@ -300,7 +209,7 @@ def render_page(source, page, models):
     return {"clean": clean, "mask": mask, "layer": layer, "render": composite}, warnings
 
 
-def materialize(page, source_path, directory, revision, models):
+def materialize(page, source_path, directory, revision, models, background_key=None):
     """Runs only in the spawned model worker, including LaMa and Pillow fonts."""
     import hashlib
     import json
@@ -357,5 +266,10 @@ def materialize(page, source_path, directory, revision, models):
             "mask": mask,
             "layer": layer,
         }.items():
-            write(result, directory / f"{page.id}.{revision}.{name}.png")
+            output_key = (
+                background_key
+                if background_key and name in {"clean", "mask"}
+                else revision
+            )
+            write(result, directory / f"{page.id}.{output_key}.{name}.png")
     return warnings

@@ -120,18 +120,42 @@ class MangaStore:
             shutil.rmtree(directory)
 
     @staticmethod
+    def background_key(page, settings):
+        values = {
+            "sha": page.sha256,
+            "removal": settings.removal,
+            "version": 3,
+            "regions": [
+                {
+                    k: r.model_dump()[k]
+                    for k in (
+                        "id",
+                        "erase_rect",
+                        "fill_color",
+                        "fill_opacity",
+                        "mask_strokes",
+                    )
+                }
+                for r in page.regions
+                if r.target.strip() or r.erase_only
+            ],
+        }
+        return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+
+    @staticmethod
     def preview_key(page, settings):
         # Only pixel-producing inputs matter; OCR progress and other pages do not.
         values = {
             "source": page.sha256,
             "removal": settings.removal,
-            "renderer": 2,
+            "renderer": 3,
             "regions": [
                 {
                     k: r.model_dump()[k]
                     for k in (
                         "id",
                         "target",
+                        "erase_only",
                         "erase_rect",
                         "layout_rect",
                         "style",
@@ -244,7 +268,7 @@ class MangaStore:
         path = self.directory(workspace_id) / (
             page.source
             if variant == "source"
-            else f"{page.id}.{self.preview_key(page, document.settings)}.{variant}.png"
+            else f"{page.id}.{self.background_key(page, document.settings) if variant in {'clean', 'mask'} else self.preview_key(page, document.settings)}.{variant}.png"
         )
         if (
             path.resolve().parent != self.directory(workspace_id).resolve()

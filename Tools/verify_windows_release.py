@@ -27,6 +27,12 @@ def verify(root):
             raise RuntimeError(f"Not x86-64: {relative}")
     if not (root / "LICENSE").is_file():
         raise RuntimeError("Project license missing")
+    subprocess.run(
+        [str(root / "AiNiee.exe"), "--check-manga-editor"],
+        cwd=root, env={**os.environ, "PATH": "", "QT_QPA_PLATFORM": "offscreen"},
+        check=True, timeout=90,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
     backend = root / "backend/AiNieeBackend.exe"
     for check in (
         "--check-media-tools",

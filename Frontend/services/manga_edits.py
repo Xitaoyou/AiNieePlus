@@ -3,6 +3,20 @@
 from copy import deepcopy
 
 
+def value_at(document, path):
+    value = document
+    for key in path:
+        if value is None:
+            return None
+        if isinstance(key, tuple):
+            if key[0] == "order":
+                return [item["id"] for item in value]
+            value = next((item for item in value if item["id"] == key[1]), None)
+        else:
+            value = value.get(key)
+    return value
+
+
 def changes(before, after, path=()):
     if before == after:
         return []

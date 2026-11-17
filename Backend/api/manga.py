@@ -62,7 +62,7 @@ def create_manga_router(runtime, authorized, service=None):
 
     @router.get("/capabilities")
     def capabilities():
-        return {"editor_version": 2, "progressive_recognition": True}
+        return {"editor_version": 3, "progressive_recognition": True}
 
     @router.get("/models")
     def models():

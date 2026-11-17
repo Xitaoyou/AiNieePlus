@@ -26,7 +26,7 @@ from Frontend.platform.qt_runtime import configure_qt_plugins
 class Backend:
     def request(self, method, path, **kwargs):
         if path == "/api/v2/manga/capabilities":
-            return {"editor_version": 2}
+            return {"editor_version": 3}
         if path == "/api/config":
             return {"config": {"platforms": {}}}
         if method == "PATCH":
@@ -222,6 +222,7 @@ def test_missing_preview_falls_back_and_late_page_response_is_ignored():
             for i in range(2)
         ]
     )
+    doc.settings.removal = "precise"
     editor.loaded(doc.model_dump())
     editor.variant.setCurrentIndex(editor.variant.findData("render"))
     editor.select_page(1)
@@ -229,7 +230,7 @@ def test_missing_preview_falls_back_and_late_page_response_is_ignored():
     app.processEvents()
     assert editor.page_id == doc.pages[1].id
     assert editor.image_data == png and editor.image_is_source
-    assert any(p.endswith("/render") for p in requests)
+    assert any(p.endswith("/clean") for p in requests)
     assert doc.pages[1].id in editor.image_ticket
     editor.save()
     assert "保存" in editor.status.text()
@@ -239,3 +240,209 @@ def test_missing_preview_falls_back_and_late_page_response_is_ignored():
     editor.deleteLater()
     app.processEvents()
     backend.http.close()
+
+
+def test_live_resize_reflows_text_before_mouse_release():
+    from PyQt5.QtCore import QBuffer, QEvent, QIODevice, QPointF, Qt
+    from PyQt5.QtGui import QImage, QMouseEvent
+    from PyQt5.QtTest import QTest
+
+    from Frontend.pages.media.manga_canvas import RegionItem
+
+    app = QApplication.instance()
+    editor = MangaPage(backend=Backend())
+    editor.load_image = lambda: None
+    doc = MangaWorkspace(
+        pages=[Page(name="test", source="test", sha256="", width=640, height=800)]
+    )
+    editor.loaded(doc.model_dump())
+    image = QImage(640, 800, QImage.Format_RGB32)
+    image.fill(Qt.white)
+    buffer = QBuffer()
+    buffer.open(QIODevice.WriteOnly)
+    image.save(buffer, "PNG")
+    editor.image_data = bytes(buffer.data())
+    editor.resize(1440, 1000)
+    editor.show()
+    app.processEvents()
+    editor.add_region({"x": 40, "y": 40, "width": 240, "height": 300, "rotation": 0})
+    editor.region_value("target", "文字应当随框实时排版，而不必切换页面。" * 5)
+    editor.style_value("size", 48)
+    editor.draw_canvas()
+    editor.canvas.fitInView(editor.canvas.sceneRect(), Qt.KeepAspectRatio)
+    app.processEvents()
+    item = next(i for i in editor.canvas.scene().items() if isinstance(i, RegionItem))
+    original_size = item.layout_info["font_size"]
+    original_undo_count = editor.undo.count()
+    start = editor.canvas.mapFromScene(QPointF(277, 337))
+    end = editor.canvas.mapFromScene(QPointF(115, 200))
+    QTest.mousePress(editor.canvas.viewport(), Qt.LeftButton, pos=start)
+    app.sendEvent(
+        editor.canvas.viewport(),
+        QMouseEvent(QEvent.MouseMove, end, Qt.NoButton, Qt.LeftButton, Qt.NoModifier),
+    )
+    app.processEvents()
+    assert editor.region()["layout_rect"]["width"] == 240  # not committed until release
+    assert item.layout_info["font_size"] < original_size
+    assert not item.layout_info["overflow"]
+    QTest.mouseRelease(editor.canvas.viewport(), Qt.LeftButton, pos=end)
+    app.processEvents()
+    assert editor.undo.count() == original_undo_count + 1
+    assert editor.region()["layout_rect"]["width"] < 100
+    editor.undo.undo()
+    assert editor.region()["layout_rect"]["width"] == 240
+    editor.undo.redo()
+    assert editor.region()["layout_rect"]["width"] < 100
+    editor.erase_region()
+    assert editor.region()["erase_only"]
+    editor.undo.undo()
+    assert not editor.region()["erase_only"]
+    editor.cleanup()
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    editor.close()
+    editor.deleteLater()
+    app.processEvents()
+
+
+def test_background_result_undo_preserves_human_corrections():
+    from Backend.domain.models.manga import Region
+
+    app = QApplication.instance()
+    editor = MangaPage(backend=Backend())
+    editor.load_image = lambda: None
+    doc = MangaWorkspace(
+        pages=[
+            Page(
+                name="p",
+                source="p",
+                sha256="",
+                width=640,
+                height=800,
+                regions=[Region(), Region()],
+            )
+        ]
+    ).model_dump()
+    editor.loaded(deepcopy(doc))
+    remote = deepcopy(doc)
+    remote["pages"][0]["regions"][0]["source"] = "machine OCR"
+    remote["pages"][0]["regions"][1]["source"] = "second machine OCR"
+    editor.document = deepcopy(remote)
+    editor.document["pages"][0]["regions"][1]["source"] = "human correction"
+    editor.record_external_edit(doc, remote, "OCR")
+    editor.undo.undo()
+    assert editor.document["pages"][0]["regions"][0]["source"] == ""
+    assert editor.document["pages"][0]["regions"][1]["source"] == "human correction"
+    editor.undo.redo()
+    assert editor.document["pages"][0]["regions"][0]["source"] == "machine OCR"
+    editor.cleanup()
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    editor.deleteLater()
+    app.processEvents()
+
+
+def test_text_field_undo_shortcut_uses_workspace_history():
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtTest import QTest
+
+    from Backend.domain.models.manga import Region
+
+    app = QApplication.instance()
+    editor = MangaPage(backend=Backend())
+    editor.load_image = lambda: None
+    doc = MangaWorkspace(
+        pages=[
+            Page(
+                name="p",
+                source="p",
+                sha256="",
+                width=640,
+                height=800,
+                regions=[Region()],
+            )
+        ]
+    )
+    editor.loaded(doc.model_dump())
+    editor.select_region(doc.pages[0].regions[0].id)
+    editor.show()
+    editor.target.setFocus()
+    app.processEvents()
+    QTest.keyClicks(editor.target, "abc")
+    assert editor.region()["target"] == "abc"
+    QTest.keyClick(editor.target, Qt.Key_Z, Qt.ControlModifier)
+    app.processEvents()
+    assert editor.region()["target"] == "ab"
+    QTest.keyClick(editor.target, Qt.Key_Y, Qt.ControlModifier)
+    app.processEvents()
+    assert editor.region()["target"] == "abc"
+    editor.select_region("")
+    assert not editor.source.isEnabled() and not editor.target.isEnabled()
+    editor.cleanup()
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    editor.close()
+    editor.deleteLater()
+    app.processEvents()
+
+
+def test_task_undo_does_not_revert_human_changes_already_saved_to_backend():
+    from Backend.domain.models.manga import Region
+
+    app = QApplication.instance()
+    editor = MangaPage(backend=Backend())
+    editor.load_image = lambda: None
+    doc = MangaWorkspace(
+        pages=[
+            Page(
+                name="p",
+                source="p",
+                sha256="",
+                width=640,
+                height=800,
+                regions=[Region()],
+            )
+        ]
+    ).model_dump()
+    editor.loaded(deepcopy(doc))
+    editor.select_region(doc["pages"][0]["regions"][0]["id"])
+    editor.job_id = "in-flight"
+    editor.region_value("target", "human target")
+    # The background job reloads the saved project, so its returned document
+    # includes human edits as well as the OCR it performed.
+    remote = deepcopy(editor.document)
+    remote["pages"][0]["regions"][0]["source"] = "new OCR"
+    editor.document = deepcopy(remote)
+    editor.job_id = None
+    editor.record_external_edit(doc, remote, "OCR")
+    editor.undo.undo()
+    assert editor.region()["target"] == "human target"
+    assert editor.region()["source"] == ""
+    editor.cleanup()
+    editor.pool.waitForDone(3000)
+    app.processEvents()
+    editor.deleteLater()
+    app.processEvents()
+
+
+def test_late_background_results_are_disconnected_after_editor_cleanup():
+    from threading import Event
+    from PyQt5.QtCore import QCoreApplication,QEvent
+    from PyQt5 import sip
+    app=QApplication.instance()
+    release=Event()
+    called=[]
+    pool=None
+    for _ in range(20):
+        editor=MangaPage(backend=Backend())
+        pool=editor.pool
+        editor.background(lambda: (release.wait(2),42)[1], called.append)
+        editor.cleanup()
+        editor.deleteLater()
+        app.processEvents()
+        QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+        assert sip.isdeleted(editor)
+    release.set()
+    pool.waitForDone(4000)
+    app.processEvents()
+    assert called == []

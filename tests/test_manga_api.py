@@ -102,7 +102,7 @@ def test_authenticated_api_queue_revision_and_assets(tmp_path):
             )
             assert invalid.status_code == 422
             assert (
-                client.get("/api/v2/manga/capabilities").json()["editor_version"] == 2
+                client.get("/api/v2/manga/capabilities").json()["editor_version"] == 3
             )
             assert client.delete("/api/v2/manga/" + doc["id"]).status_code == 200
             assert client.get("/api/v2/manga/" + doc["id"]).status_code == 404

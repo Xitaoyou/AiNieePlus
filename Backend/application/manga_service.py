@@ -161,6 +161,7 @@ class MangaService:
                 ]
                 result = self.translate(document, pages[0], selected, context, options)
                 if result:
+                    report["translation"] = result
                     report["warnings"].extend(result.get("failed_items", []))
                 with self.store.lock:
                     current = self.store.load(workspace_id)
@@ -397,7 +398,9 @@ class MangaService:
                         }
                     )
         return {
-            "status": "partial" if report["errors"] else "success",
+            "status": "partial"
+            if report["errors"] or report.get("translation", {}).get("failed")
+            else "success",
             "workspace": self.store.load(workspace_id).model_dump(),
             "report": report,
         }
@@ -415,7 +418,15 @@ class MangaService:
             and (not r.target or options.get("retranslate"))
         ]
         if not selected:
-            return
+            return {"total": 0, "succeeded": 0, "failed": 0, "failed_items": []}
+        with self.store.lock:
+            latest = self.store.load(document.id)
+            selected_ids = {r.id for r in selected}
+            for p in latest.pages:
+                for r in p.regions:
+                    if r.id in selected_ids:
+                        r.translation_state, r.translation_error = "pending", ""
+            self.store.save(latest, latest.revision)
         dialogue = {r.id: r.source for r in selected}
         path = self.store.directory(document.id) / "translation-source.json"
         atomic_json(path, dialogue)
@@ -469,6 +480,7 @@ class MangaService:
         from dataclasses import replace
 
         original = {r.id: r.model_copy(deep=True) for r in selected}
+        applied = set()
 
         def commit_items(items, *_):
             from Backend.core.protocol import to_wire
@@ -492,6 +504,11 @@ class MangaService:
                         and region.target == before.target
                     ):
                         region.target = value
+                        applied.add(key)
+                        region.translation_state, region.translation_error = (
+                            "succeeded",
+                            "",
+                        )
                         original[key] = region.model_copy(deep=True)
                         changed = True
                 if changed:
@@ -499,12 +516,57 @@ class MangaService:
             if context.on_batch_complete:
                 context.on_batch_complete(items, *_)
 
+        def progress(snapshot):
+            if context.on_progress:
+                context.on_progress(
+                    {
+                        **snapshot,
+                        "stage": "translate",
+                        "unit": "框",
+                        "current": snapshot.get("line", 0),
+                        "total": snapshot.get("total_line", len(selected)),
+                    }
+                )
+
+        progress({"line": 0, "total_line": len(selected)})
         stage_context = replace(
             context,
             cancel_event=StageCancellation(context.cancel_event),
             on_batch_complete=commit_items,
+            on_progress=progress,
         )
-        result = translate_model(model, config=config, context=stage_context)
+        try:
+            result = translate_model(model, config=config, context=stage_context)
+        except Exception:
+            with self.store.lock:
+                latest = self.store.load(document.id)
+                for p in latest.pages:
+                    for r in p.regions:
+                        if r.id in original and r.translation_state == "pending":
+                            r.translation_state = (
+                                "cancelled" if context.is_cancelled() else "failed"
+                            )
+                            r.translation_error = (
+                                "任务已取消"
+                                if context.is_cancelled()
+                                else "翻译任务异常中止，请检查接口日志"
+                            )
+                self.store.save(latest, latest.revision)
+            raise
+        translation_report = result.get("report", {})
+        failures = {f["item_id"]: f for f in translation_report.get("failed_items", [])}
+        with self.store.lock:
+            latest = self.store.load(document.id)
+            for p in latest.pages:
+                for r in p.regions:
+                    if r.id in failures:
+                        r.translation_state = (
+                            "cancelled" if context.is_cancelled() else "failed"
+                        )
+                        r.translation_error = failures[r.id].get(
+                            "message", "未获得有效译文"
+                        )
+            self.store.save(latest, latest.revision)
         translated = to_wire(result["model"])
         by_id = {
             item["item_id"]: item
@@ -520,8 +582,21 @@ class MangaService:
                 409,
                 result.get("report"),
             )
-        commit_items(list(by_id.values()))
-        return result.get("report", {})
+        commit_items([item for key, item in by_id.items() if key not in failures])
+        with self.store.lock:
+            latest = self.store.load(document.id)
+            for p in latest.pages:
+                for r in p.regions:
+                    if r.id in original and r.translation_state == "pending":
+                        r.translation_state = "idle"
+                        r.translation_error = (
+                            "文本翻译规则已跳过此条"
+                            if by_id.get(r.id, {}).get("translation_status") == 7
+                            else "人工校对或锁定已改变，未覆盖本次编辑"
+                        )
+            self.store.save(latest, latest.revision)
+        translation_report["applied"] = len(applied)
+        return translation_report
 
     def render(
         self, document, page, revision, report, context=None, erase_untranslated=False
@@ -538,6 +613,7 @@ class MangaService:
             render_data={
                 "page": page_data.model_dump(),
                 "revision": self.store.preview_key(page, document.settings),
+                "background_key": self.store.background_key(page, document.settings),
                 "directory": str(self.store.directory(document.id)),
                 "bundled": str(getattr(self.models, "bundled", "")),
                 "erase_untranslated": erase_untranslated,

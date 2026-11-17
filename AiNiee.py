@@ -32,5 +32,9 @@ import sys
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    if sys.argv[1:] == ["--check-manga-editor"]:
+        from Frontend.pages.media.manga_runtime_check import check_editor
+        check_editor()
+        sys.exit(0)
     from Frontend.app.bootstrap import main
     sys.exit(main())

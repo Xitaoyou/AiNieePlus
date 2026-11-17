@@ -60,7 +60,7 @@ jobs:
         run: python -m Tools.prepare_manga_models --download
 
       - name: Verify manga backend workflows
-        run: python Tools/run_manga_tests.py tests/test_manga.py tests/test_manga_api.py -q
+        run: python Tools/run_manga_tests.py tests/test_manga.py tests/test_manga_api.py tests/test_manga_lettering.py -q
 
       - name: Verify manga Fluent editor
         env:

@@ -406,3 +406,63 @@ def test_separate_translation_exports_and_permanent_delete(workspace, tmp_path):
     assert original.exists() and Path(source).exists()
     with pytest.raises(PipelineError):
         store.load(doc.id)
+
+
+def test_translation_progress_and_failed_frames_are_persisted(workspace, monkeypatch):
+    from Backend.application import translation_service
+    from Backend.core.protocol import to_wire
+    from Backend.domain.models.intermediate import parse_model
+
+    store, doc = workspace
+    for p in doc.pages:
+        p.regions[0].target = ""
+    doc = store.save(doc, doc.revision)
+    progress = []
+
+    def translate(model, config, context):
+        project = parse_model(model)
+        items = project.files["dialogue.json"].items
+        items[0].translated_text = "success"
+        items[0].translation_status = 1
+        context.on_batch_complete([items[0]], "dialogue.json", {})
+        context.on_progress({"line": 1, "total_line": 2, "total_requests": 1})
+        return {
+            "model": to_wire(project),
+            "status": "partial",
+            "report": {
+                "total": 2,
+                "succeeded": 1,
+                "failed": 1,
+                "skipped": 0,
+                "failed_items": [
+                    {"item_id": items[1].item_id, "message": "provider timeout"}
+                ],
+            },
+        }
+
+    monkeypatch.setattr(translation_service, "translate_model", translate)
+    result = MangaService(store, StubModels()).run(
+        doc.id, "translate", context=ExecutionContext(on_progress=progress.append)
+    )
+    assert result["status"] == "partial"
+    assert result["report"]["translation"]["failed"] == 1
+    assert any(
+        p.get("current") == 1 and p["total"] == 2 and p["unit"] == "框"
+        for p in progress
+    )
+    latest = store.load(doc.id)
+    assert latest.pages[0].regions[0].translation_state == "succeeded"
+    assert latest.pages[1].regions[0].translation_state == "failed"
+    assert latest.pages[1].regions[0].translation_error == "provider timeout"
+
+
+def test_background_cache_survives_typography_changes(workspace):
+    store, doc = workspace
+    page = doc.pages[0]
+    key = store.background_key(page, doc.settings)
+    page.regions[0].layout_rect.width = 120
+    page.regions[0].style.size = 40
+    page.regions[0].target = "new target text"
+    assert store.background_key(page, doc.settings) == key
+    page.regions[0].erase_rect.x = 15
+    assert store.background_key(page, doc.settings) != key

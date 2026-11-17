@@ -1,9 +1,11 @@
 """Native CPU detection and recognition; no ImageTrans or Java process."""
 
-from functools import lru_cache
 import re
+from functools import lru_cache
+
 import numpy as np
 from PIL import Image
+
 from Backend.application.pipeline_common import PipelineError
 
 
@@ -144,14 +146,14 @@ def worker(
     from pathlib import Path
 
     if operation == "render":
-        from Backend.infrastructure.manga.render import materialize
-        from Backend.infrastructure.manga.models import ModelRegistry
         from Backend.domain.models.manga import MangaPage
+        from Backend.infrastructure.manga.models import ModelRegistry
+        from Backend.infrastructure.manga.render import materialize
 
         page = MangaPage.model_validate(render_data["page"])
         if not render_data.get("erase_untranslated"):
             for region in page.regions:
-                if not region.target.strip():
+                if not region.target.strip() and not region.erase_only:
                     region.removal = "none"
         return materialize(
             page,
@@ -159,6 +161,7 @@ def worker(
             Path(render_data["directory"]),
             render_data["revision"],
             ModelRegistry(root=folder or None, bundled=render_data["bundled"] or None),
+            background_key=render_data.get("background_key"),
         )
     with Image.open(image_path) as image:
         image = image.convert("RGB")

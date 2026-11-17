@@ -74,6 +74,11 @@ class Region(MangaModel):
     layout_rect: Rect = Field(default_factory=Rect)
     source: str = ""
     target: str = ""
+    erase_only: bool = False
+    translation_state: Literal[
+        "idle", "pending", "succeeded", "failed", "cancelled"
+    ] = "idle"
+    translation_error: str = ""
     source_locked: bool = False
     target_locked: bool = False
     geometry_locked: bool = False
