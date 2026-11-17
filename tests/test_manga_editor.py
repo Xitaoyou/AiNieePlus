@@ -272,6 +272,7 @@ def test_live_resize_reflows_text_before_mouse_release():
     editor.canvas.fitInView(editor.canvas.sceneRect(), Qt.KeepAspectRatio)
     app.processEvents()
     item = next(i for i in editor.canvas.scene().items() if isinstance(i, RegionItem))
+    assert editor.size.lineEdit().width() >= 24  # Fluent arrow buttons must not hide the numeric value
     original_size = item.layout_info["font_size"]
     original_undo_count = editor.undo.count()
     start = editor.canvas.mapFromScene(QPointF(277, 337))

@@ -562,7 +562,7 @@ class MangaPage(QWidget):
         tools.addWidget(self.variant)
         self.brush = QSpinBox()
         self.brush.setRange(1, 256)
-        self.brush.setFixedWidth(80)
+        self.brush.setFixedWidth(120)
         self.brush.setToolTip("蒙版画笔半径")
         self.brush.setValue(8)
         self.brush.hide()
@@ -798,7 +798,7 @@ class MangaPage(QWidget):
                 removed.labelItem.widget().deleteLater()
         typography = QHBoxLayout()
         typography.addWidget(self.font, 1)
-        self.size.setFixedWidth(85)
+        self.size.setFixedWidth(130)
         self.size.setToolTip(
             "自动适应开启时，这是字号上限；缩小框时文字会自动缩小以完整显示"
         )
