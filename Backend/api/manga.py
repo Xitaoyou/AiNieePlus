@@ -175,6 +175,7 @@ def create_manga_router(runtime, authorized, service=None):
             )
             if body.title:
                 doc.title = body.title.strip() or doc.title
+                doc = service.store.save(doc, doc.revision)
             if body.recognize and doc.settings.auto_recognize:
                 return service.run(doc.id, "recognize", context=context)
             return {"status": "success", "workspace": doc.model_dump(), "report": {}}

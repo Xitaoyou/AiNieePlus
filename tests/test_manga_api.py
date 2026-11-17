@@ -80,10 +80,20 @@ def test_authenticated_api_queue_revision_and_assets(tmp_path):
             Image.new("RGB", (100, 100), "white").save(source)
             result = client.post(
                 "/api/v2/manga/import",
-                json={"paths": [str(source)], "settings": {"auto_recognize": False}},
+                json={
+                    "paths": [str(source)],
+                    "title": "自定义漫画名",
+                    "settings": {"auto_recognize": False},
+                },
             )
             assert result.status_code == 200, result.text
             doc = result.json()["workspace"]
+            assert doc["title"] == "自定义漫画名"
+            assert service.store.load(doc["id"]).title == "自定义漫画名"
+            assert (
+                client.get("/api/v2/manga/" + doc["id"]).json()["workspace"]["title"]
+                == "自定义漫画名"
+            )
             changed = client.patch(
                 "/api/v2/manga/" + doc["id"],
                 json={"workspace": doc, "expected_revision": doc["revision"]},

@@ -1,8 +1,10 @@
 """Native Qt geometry and mask interaction, always in original-image coordinates."""
 
 import json
+import weakref
 from io import BytesIO
 
+from PyQt5 import sip
 from PyQt5.QtCore import QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
@@ -54,8 +56,8 @@ class RegionItem(QGraphicsRectItem):
                 # 延迟到事件循环：draw_canvas 期间 blockSignals 会吞掉本信号
                 QTimer.singleShot(
                     0,
-                    lambda rid=self.region["id"], info=self.layout_info: self.canvas.layoutMeasured.emit(
-                        rid, info
+                    lambda canvas_ref=weakref.ref(self.canvas), rid=self.region["id"], info=self.layout_info: (
+                        self.notify_layout(canvas_ref, rid, info)
                     ),
                 )
                 self.setToolTip(
@@ -83,6 +85,12 @@ class RegionItem(QGraphicsRectItem):
                 QRectF(self.rect().width() - 8, self.rect().height() - 8, 8, 8),
                 QColor("#ffbc42"),
             )
+
+    @staticmethod
+    def notify_layout(canvas_ref, region_id, info):
+        canvas = canvas_ref()
+        if canvas is not None and not sip.isdeleted(canvas):
+            canvas.layoutMeasured.emit(region_id, info)
 
     def mousePressEvent(self, event):
         self.resizing = (

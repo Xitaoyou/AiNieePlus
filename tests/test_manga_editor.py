@@ -845,3 +845,54 @@ def test_import_dialog_accepts_selected_real_directory(tmp_path):
     assert dialog.paths == [str(folder.resolve())]
     dialog.deleteLater()
     app.processEvents()
+
+
+def test_import_metadata_and_append_preserve_selected_languages(monkeypatch, tmp_path):
+    from Frontend.pages.media import manga_page as module
+
+    editor = make_editor_for_actions()
+    editor.prepare_to_leave = lambda: True
+    payloads = []
+    editor.client.request = lambda *args, **kwargs: payloads.append(kwargs["json"])
+    editor.start_request = lambda action, callback: action()
+
+    def accept(dialog):
+        dialog.name_edit.setText("新漫画")
+        dialog.source_language.setCurrentIndex(dialog.source_language.findData("ko"))
+        dialog.target_language.setCurrentIndex(dialog.target_language.findData("en"))
+        dialog.append.setChecked(True)
+        return module.QDialog.Accepted
+
+    monkeypatch.setattr(module.ImportDialog, "exec", accept)
+    editor.import_paths([str(tmp_path)])
+    assert payloads[0]["title"] == "新漫画"
+    assert payloads[0]["workspace_id"] == editor.document["id"]
+    assert payloads[0]["settings"]["source_language"] == "ko"
+    assert payloads[0]["settings"]["target_language"] == "en"
+    dispose_editor(editor)
+
+
+def test_font_controls_and_progress_overlay_remain_accessible():
+    editor = make_editor_for_actions()
+    app = QApplication.instance()
+    editor.resize(1440, 1000)
+    editor.show()
+    app.processEvents()
+    assert editor.autofit.isVisible()
+    editor.size.setValue(42)
+    assert not editor.region()["style"]["autofit"]
+    editor.autofit.setChecked(True)
+    assert editor.region()["style"]["autofit"]
+    editor.align.setCurrentIndex(editor.align.findData("right"))
+    editor.select_region(editor.selected)
+    assert editor.align.currentData() == "right"
+    editor.progress_panel.show()
+    editor.position_progress_panel()
+    assert not editor.progress_panel.geometry().intersects(
+        editor.zoom_overlay.geometry()
+    )
+    editor.submitting = True
+    editor.cancel_job()
+    assert editor.cancel_pending
+    editor.submitting = False
+    dispose_editor(editor)

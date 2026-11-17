@@ -30,10 +30,10 @@ from PyQt5.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
-    QLineEdit,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QShortcut,
@@ -410,13 +410,29 @@ IMAGE_FILTER = (
 
 
 def pick_image_paths(parent):
-    """Native multi-file picker; returns resolved existing paths."""
-    paths, _ = QFileDialog.getOpenFileNames(parent, "导入图片", "", IMAGE_FILTER)
-    return [
-        str(Path(p).resolve())
-        for p in paths
-        if p and Path(p).exists()
-    ]
+    """One import entry accepts images, PDFs and directories together."""
+    dialog = MixedImportDialog(parent)
+    return dialog.paths if dialog.exec() == QDialog.Accepted else []
+
+
+class MixedImportDialog(QFileDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent, "导入图片、PDF 或文件夹")
+        self.setOption(QFileDialog.DontUseNativeDialog, True)
+        self.setFileMode(QFileDialog.ExistingFiles)
+        self.setNameFilter(IMAGE_FILTER)
+        self.setLabelText(QFileDialog.Accept, "导入所选文件或文件夹")
+        for view in self.findChildren(QAbstractItemView):
+            view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.paths = []
+
+    def accept(self):
+        paths = [
+            str(Path(p).resolve()) for p in self.selectedFiles() if Path(p).exists()
+        ]
+        if paths:
+            self.paths = paths
+            QDialog.accept(self)
 
 
 class ImportDialog(QDialog):
@@ -424,7 +440,7 @@ class ImportDialog(QDialog):
 
     LANGUAGE_LABELS = [
         ("日语", "ja"),
-        ("中文", "zh"),
+        ("中文", "zh-CN"),
         ("英语", "en"),
         ("韩语", "ko"),
     ]
@@ -450,6 +466,9 @@ class ImportDialog(QDialog):
         form.addRow("原文语言", self.source_language)
         form.addRow("目标语言", self.target_language)
         layout.addLayout(form)
+        self.append = QCheckBox("追加到当前工程", self)
+        self.append.setVisible(bool(getattr(parent, "document", None)))
+        layout.addWidget(self.append)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         cancel = QPushButton("取消")
@@ -684,9 +703,7 @@ class MangaPage(QWidget):
         self.vertical_button = TransparentPushButton("竖")
         self.vertical_button.setCheckable(True)
         self.vertical_button.setToolTip("竖排文字")
-        self.vertical_button.clicked.connect(
-            lambda: self.style_value("vertical", True)
-        )
+        self.vertical_button.clicked.connect(lambda: self.style_value("vertical", True))
         self.bold_button = TransparentPushButton("B")
         self.bold_button.setCheckable(True)
         self.bold_button.setToolTip("粗体")
@@ -697,7 +714,11 @@ class MangaPage(QWidget):
         self.color_button.setToolTip("文字颜色")
         self.color_button.clicked.connect(lambda: self.pick_color("color"))
         self.align = QComboBox()
-        for title, value in [("左对齐", "left"), ("居中", "center"), ("右对齐", "right")]:
+        for title, value in [
+            ("左对齐", "left"),
+            ("居中", "center"),
+            ("右对齐", "right"),
+        ]:
             self.align.addItem(title, value)
         self.align.currentIndexChanged.connect(
             lambda: self.style_value("align", self.align.currentData())
@@ -706,9 +727,7 @@ class MangaPage(QWidget):
         self.spacing.setRange(0.5, 4)
         self.spacing.setValue(1.2)
         self.spacing.setSingleStep(0.1)
-        self.spacing.valueChanged.connect(
-            lambda v: self.style_value("line_spacing", v)
-        )
+        self.spacing.valueChanged.connect(lambda v: self.style_value("line_spacing", v))
         self.charspace = QSpinBox()
         self.charspace.setRange(-10, 50)
         self.charspace.valueChanged.connect(
@@ -1101,6 +1120,7 @@ class MangaPage(QWidget):
         typography.addWidget(self.font, 1)
         typography.addWidget(self.size)
         typography_form.addRow(typography)
+        typography_form.addRow(self.autofit)
         common_row = QHBoxLayout()
         common_row.setSpacing(4)
         common_row.addWidget(self.horizontal_button)
@@ -1118,6 +1138,7 @@ class MangaPage(QWidget):
         advanced_form.addRow("行距", self.spacing)
         advanced_form.addRow("字距", self.charspace)
         advanced_form.addRow("描边宽度", self.stroke)
+        self.button(advanced_form, "描边颜色", lambda: self.pick_color("stroke_color"))
         advanced_form.addRow("旋转角度", self.rotation)
         fill_row = QHBoxLayout()
         self.button(
@@ -1421,7 +1442,13 @@ class MangaPage(QWidget):
         self.progress_panel.adjustSize()
         self.progress_panel.move(
             max(0, self.canvas.viewport().width() - self.progress_panel.width() - 10),
-            max(0, self.canvas.viewport().height() - self.progress_panel.height() - 10),
+            max(
+                0,
+                self.canvas.viewport().height()
+                - self.progress_panel.height()
+                - self.zoom_overlay.height()
+                - 20,
+            ),
         )
         self.progress_panel.raise_()
 
@@ -1459,6 +1486,8 @@ class MangaPage(QWidget):
             and event.type() == QEvent.Resize
         ):
             self.position_zoom_controls()
+            if hasattr(self, "progress_panel") and not self.progress_panel.isHidden():
+                self.position_progress_panel()
         if watched in (getattr(self, "source", None), getattr(self, "target", None)):
             if event.type() == QEvent.ShortcutOverride and (
                 event.matches(QKeySequence.Undo) or event.matches(QKeySequence.Redo)
@@ -1722,11 +1751,19 @@ class MangaPage(QWidget):
 
     def refresh_fonts(self):
         def loaded_fonts(result):
+            selected_font = (
+                self.region()["style"]["font"]
+                if self.region()
+                else self.font.currentData()
+            )
             self.font.blockSignals(True)
             self.font.clear()
             self.font.addItem("内置字体", "")
             for path in result.get("fonts", []):
                 self.font.addItem(Path(path).name, path)
+            if selected_font and self.font.findData(selected_font) < 0:
+                self.font.addItem(Path(selected_font).name, selected_font)
+            self.font.setCurrentIndex(max(0, self.font.findData(selected_font or "")))
             self.font.blockSignals(False)
 
         self.background(lambda: self.client.request("GET", "/fonts"), loaded_fonts)
@@ -1997,7 +2034,6 @@ class MangaPage(QWidget):
         self.vertical_button.setChecked(s["vertical"])
         self.bold_button.setChecked(s["bold"])
         self.autofit.setChecked(s["autofit"])
-        self.align.setCurrentText(s["align"])
         if s["font"] and self.font.findData(s["font"]) < 0:
             self.font.addItem(Path(s["font"]).name, s["font"])
         self.font.setCurrentIndex(max(0, self.font.findData(s["font"])))
@@ -2545,25 +2581,29 @@ class MangaPage(QWidget):
         dialog = ImportDialog(self, len(paths), default_name)
         if dialog.exec() != QDialog.Accepted:
             return
-        settings = deepcopy(self.document["settings"]) if self.document else {
-            "detector": self.detector.currentText(),
-            "ocr": self.ocr.currentText(),
-            "source_language": dialog.source_language.currentData(),
-            "target_language": dialog.target_language.currentData(),
-            "confidence": self.confidence.value(),
-            "right_to_left": self.rtl.isChecked(),
-            "detect_panels": self.panels.isChecked(),
-            "auto_recognize": self.auto_recognize.isChecked(),
-        }
+        settings = (
+            deepcopy(self.document["settings"])
+            if self.document
+            else {
+                "detector": self.detector.currentText(),
+                "ocr": self.ocr.currentText(),
+                "source_language": dialog.source_language.currentData(),
+                "target_language": dialog.target_language.currentData(),
+                "confidence": self.confidence.value(),
+                "right_to_left": self.rtl.isChecked(),
+                "detect_panels": self.panels.isChecked(),
+                "auto_recognize": self.auto_recognize.isChecked(),
+            }
+        )
         for key in ("source_language", "target_language"):
-            value = getattr(self, key).currentData()
-            if value:
-                settings[key] = value
+            settings[key] = getattr(dialog, key).currentData()
         payload = {
             "paths": paths,
             "title": dialog.name_edit.text().strip() or None,
             "settings": settings,
         }
+        if self.document and dialog.append.isChecked():
+            payload["workspace_id"] = self.document["id"]
 
         def imported(result):
             self.loaded(result["workspace"])
@@ -2697,6 +2737,7 @@ class MangaPage(QWidget):
             self.status.setText("请等待当前任务结束，或先取消")
             return
         self.submitting = True
+        self.cancel_pending = False
         self.job_base = deepcopy(self.document)
         self.job_manual_paths = set()
         session = self.session
@@ -2716,6 +2757,8 @@ class MangaPage(QWidget):
             self.job_callback = callback
             if self.job_id:
                 self.poll_timer.start()
+                if self.cancel_pending:
+                    self.cancel_job()
             else:
                 self.progress_panel.hide()
                 callback(result)
@@ -2838,6 +2881,10 @@ class MangaPage(QWidget):
 
     def cancel_job(self):
         identifier = self.job_id
+        if self.submitting and not identifier:
+            self.cancel_pending = True
+            self.status.setText("已请求取消，等待任务提交完成…")
+            return
         if identifier:
             self.background(
                 lambda: self.client.backend.request(
