@@ -1,20 +1,23 @@
 """Independent manga transport, reusing image admission and existing job events."""
 
 from typing import Literal
+
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import FileResponse
 from pydantic import Field
-from Backend.api.schemas import RequestModel
+
 from Backend.api.queued import run_queued
+from Backend.api.schemas import RequestModel
 from Backend.application.manga_service import MangaService
 from Backend.application.pipeline_common import PipelineError
-from Backend.domain.models.manga import MangaWorkspace, MangaSettings
+from Backend.domain.models.manga import MangaSettings, MangaWorkspace
 
 
 class MangaImport(RequestModel):
     paths: list[str] = Field(min_length=1, max_length=100)
     settings: MangaSettings = Field(default_factory=MangaSettings)
     workspace_id: str | None = None
+    recognize: bool = False
 
 
 class MangaSave(RequestModel):
@@ -41,7 +44,9 @@ class MangaRun(RequestModel):
 
 class MangaExport(RequestModel):
     output_dir: str = Field(min_length=1)
-    mode: Literal["png", "jpeg", "zip", "project", "i18next"] = "png"
+    mode: Literal[
+        "png", "jpeg", "zip", "project", "i18next", "i18next-source", "i18next-target"
+    ] = "png"
 
 
 class ModelImport(RequestModel):
@@ -54,6 +59,10 @@ def create_manga_router(runtime, authorized, service=None):
     )
     service = service or MangaService()
     runtime.manga = service
+
+    @router.get("/capabilities")
+    def capabilities():
+        return {"editor_version": 2, "progressive_recognition": True}
 
     @router.get("/models")
     def models():
@@ -130,7 +139,7 @@ def create_manga_router(runtime, authorized, service=None):
             doc = service.store.import_images(
                 body.paths, body.settings.model_dump(), body.workspace_id, context
             )
-            if doc.settings.auto_recognize:
+            if body.recognize and doc.settings.auto_recognize:
                 return service.run(doc.id, "recognize", context=context)
             return {"status": "success", "workspace": doc.model_dump(), "report": {}}
 
@@ -141,6 +150,27 @@ def create_manga_router(runtime, authorized, service=None):
     @router.get("/{workspace_id}")
     def load(workspace_id: str):
         return {"workspace": service.store.load(workspace_id).model_dump()}
+
+    @router.delete("/{workspace_id}")
+    async def delete(workspace_id: str, prefer: str | None = Header(default=None)):
+        service.store.load(workspace_id)
+        for job in runtime.scheduler.list(lane="image", limit=1000):
+            if job.get("project_id") == workspace_id and job["state"] in {
+                "queued",
+                "running",
+                "cancelling",
+            }:
+                runtime.scheduler.cancel(job["id"])
+        # The same serial image lane lets any cancelled inference finish before
+        # deletion, so a late worker cannot recreate the removed project.
+        return await run_queued(
+            runtime,
+            "manga/delete",
+            lambda c: service.store.delete(workspace_id) or {"deleted": workspace_id},
+            lane="image",
+            prefer=prefer,
+            project_id=workspace_id,
+        )
 
     @router.patch("/{workspace_id}")
     def save(workspace_id: str, body: MangaSave):

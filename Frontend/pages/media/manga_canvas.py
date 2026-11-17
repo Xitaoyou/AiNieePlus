@@ -1,14 +1,14 @@
 """Native Qt geometry and mask interaction, always in original-image coordinates."""
 
-from PyQt5.QtCore import Qt, QRectF, pyqtSignal
-from PyQt5.QtGui import QColor, QPen, QPainter, QPixmap
+from PyQt5.QtCore import QRectF, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
-    QGraphicsView,
-    QGraphicsScene,
-    QGraphicsRectItem,
     QGraphicsItem,
+    QGraphicsRectItem,
+    QGraphicsScene,
+    QGraphicsView,
 )
-from qfluentwidgets import qconfig, isDarkTheme
+from qfluentwidgets import isDarkTheme, qconfig
 
 
 class RegionItem(QGraphicsRectItem):
@@ -24,8 +24,8 @@ class RegionItem(QGraphicsRectItem):
         self.resizing = False
 
     def paint(self, painter, option, widget=None):
-        self.setPen(QPen(QColor("#ffbc42" if self.isSelected() else "#25b9e8"), 2))
-        super().paint(painter, option, widget)
+        painter.setPen(QPen(QColor("#ffbc42" if self.isSelected() else "#25b9e8"), 2))
+        painter.drawRect(self.rect())
         painter.drawText(
             self.rect().adjusted(4, 0, -4, 0),
             Qt.AlignTop | Qt.AlignLeft,
@@ -122,16 +122,42 @@ class MangaCanvas(QGraphicsView):
         )
 
     def display(self, data, page, selected=None, fit=False):
-        self.scene().clear()
-        self.box_preview = None
-        self.lines = []
+        # Keep live region objects during selection/drag events. Replacing the
+        # scene inside a QGraphicsItem event can invalidate its C++ receiver.
+        if getattr(self, "display_page", None) != page["id"]:
+            self.scene().clear()
+            self.pixmap_item = self.scene().addPixmap(QPixmap())
+            self.box_preview = None
+            self.lines = []
+        self.display_page = page["id"]
+        from PyQt5 import sip
+
+        if not getattr(self, "pixmap_item", None) or sip.isdeleted(self.pixmap_item):
+            self.pixmap_item = self.scene().addPixmap(QPixmap())
         pixmap = QPixmap()
         pixmap.loadFromData(data)
-        self.scene().addPixmap(pixmap)
+        self.pixmap_item.setPixmap(pixmap)
         self.setSceneRect(0, 0, page["width"], page["height"])
+        existing = {
+            i.region["id"]: i for i in self.scene().items() if isinstance(i, RegionItem)
+        }
+        desired = {r["id"] for r in page["regions"]}
+        for key, item in existing.items():
+            if key not in desired or item.rect_key != self.rect_key:
+                self.scene().removeItem(item)
         for region in page["regions"]:
-            item = RegionItem(region, self.rect_key, self)
-            self.scene().addItem(item)
+            item = existing.get(region["id"])
+            if item is None or item.scene() is None:
+                item = RegionItem(region, self.rect_key, self)
+                self.scene().addItem(item)
+            else:
+                item.region = region
+                rect = region[self.rect_key]
+                item.setPos(rect["x"], rect["y"])
+                item.setRect(0, 0, rect["width"], rect["height"])
+                item.setFlag(
+                    QGraphicsItem.ItemIsMovable, not region.get("geometry_locked")
+                )
             item.setSelected(
                 region["id"] in (selected if isinstance(selected, list) else [selected])
             )
@@ -223,21 +249,21 @@ class MangaCanvas(QGraphicsView):
                 )
                 if rect.width() >= 4 and rect.height() >= 4:
                     self.boxCreated.emit(
-                        dict(
-                            x=rect.x(),
-                            y=rect.y(),
-                            width=rect.width(),
-                            height=rect.height(),
-                            rotation=0,
-                        )
+                        {
+                            "x": rect.x(),
+                            "y": rect.y(),
+                            "width": rect.width(),
+                            "height": rect.height(),
+                            "rotation": 0,
+                        }
                     )
             elif self.mode in {"mask", "eraser"}:
                 self.strokeCreated.emit(
-                    dict(
-                        points=self.points,
-                        radius=self.radius,
-                        erase=self.mode == "eraser",
-                    )
+                    {
+                        "points": self.points,
+                        "radius": self.radius,
+                        "erase": self.mode == "eraser",
+                    }
                 )
             self.start = None
             return
@@ -245,6 +271,12 @@ class MangaCanvas(QGraphicsView):
         self.setDragMode(QGraphicsView.RubberBandDrag)
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.start = None
+            if self.box_preview is not None:
+                self.scene().removeItem(self.box_preview)
+                self.box_preview = None
+            return
         if event.key() == Qt.Key_Delete:
             self.deleteRequested.emit()
         else:

@@ -1,53 +1,104 @@
 """Native editable manga workspace. Network and inference never run on the GUI thread."""
 
 from copy import deepcopy
+from functools import wraps
 from pathlib import Path
 from uuid import uuid4
-from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QPalette, QColor
-from PyQt5.QtCore import QUrl
+
+from PyQt5 import sip
+from PyQt5.QtCore import (
+    QBuffer,
+    QIODevice,
+    QObject,
+    QRectF,
+    QRunnable,
+    Qt,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+)
+from PyQt5.QtGui import QColor, QDesktopServices, QFont, QImage, QPainter, QPalette
 from PyQt5.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QSplitter,
-    QFormLayout,
-    QFileDialog,
-    QMessageBox,
-    QDialog,
-    QTableWidgetItem,
     QColorDialog,
-    QUndoStack,
-    QUndoCommand,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
     QInputDialog,
+    QMessageBox,
+    QSplitter,
     QStackedWidget,
+    QTableWidgetItem,
+    QUndoCommand,
+    QUndoStack,
+    QVBoxLayout,
+    QWidget,
+)
+from PyQt5.QtWidgets import (
     QLabel as NativeLabel,
 )
 from qfluentwidgets import (
-    ComboBox as FluentComboBox,
-    PlainTextEdit as QPlainTextEdit,
-    SpinBox as QSpinBox,
-    DoubleSpinBox as QDoubleSpinBox,
-    CheckBox as QCheckBox,
-    ListWidget as QListWidget,
-    TableWidget as QTableWidget,
-    PushButton as QPushButton,
     CaptionLabel as QLabel,
-    SingleDirectionScrollArea as QScrollArea,
-    TransparentPushButton,
+)
+from qfluentwidgets import (
+    CheckBox as QCheckBox,
+)
+from qfluentwidgets import (
+    ComboBox as FluentComboBox,
+)
+from qfluentwidgets import (
+    DoubleSpinBox as QDoubleSpinBox,
+)
+from qfluentwidgets import (
+    FluentIcon,
     PrimaryPushButton,
     SimpleCardWidget,
-    SubtitleLabel,
     StrongBodyLabel,
-    FluentIcon,
-    qconfig,
+    SubtitleLabel,
+    TransparentPushButton,
     isDarkTheme,
-    TransparentToolButton,
+    qconfig,
 )
-from Frontend.pages.media.start_page import MediaStartPage
+from qfluentwidgets import (
+    ListWidget as QListWidget,
+)
+from qfluentwidgets import (
+    PlainTextEdit as QPlainTextEdit,
+)
+from qfluentwidgets import (
+    PushButton as QPushButton,
+)
+from qfluentwidgets import (
+    SingleDirectionScrollArea as QScrollArea,
+)
+from qfluentwidgets import (
+    SpinBox as QSpinBox,
+)
+from qfluentwidgets import (
+    TableWidget as QTableWidget,
+)
+
 from Frontend.pages.media.manga_canvas import MangaCanvas
+from Frontend.pages.media.start_page import MediaStartPage
 from Frontend.services.manga_client import MangaClient
+from Frontend.services.manga_edits import apply as apply_changes
+from Frontend.services.manga_edits import changes
 from Frontend.services.manga_merge import merge_edits
+
+
+def form_update(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        previous = self.loading_form
+        self.loading_form = True
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self.loading_form = previous
+
+    return guarded
 
 
 class QComboBox(FluentComboBox):
@@ -76,13 +127,16 @@ class Background(QRunnable):
 class EditCommand(QUndoCommand):
     def __init__(self, page, before, after, label):
         super().__init__(label)
-        self.page, self.before, self.after = page, before, after
+        self.page = page
+        self.edits = changes(before, after)
 
     def redo(self):
-        self.page.apply_edit(self.after)
+        apply_changes(self.page.document, self.edits)
+        self.page.apply_edit(self.page.document)
 
     def undo(self):
-        self.page.apply_edit(self.before)
+        apply_changes(self.page.document, self.edits, forward=False)
+        self.page.apply_edit(self.page.document)
 
 
 class ModelDialog(QDialog):
@@ -100,7 +154,8 @@ class ModelDialog(QDialog):
                 "核心模型随安装包提供。扩展模型保留原权重版本；legacy 可从 ImageTrans 模型文件夹导入。"
             )
         )
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(
             ["模型", "状态", "大小", "用途与建议", "来源许可"]
         )
@@ -213,11 +268,15 @@ class MangaPage(QWidget):
         self.selected = None
         self.page_id = None
         self.image_data = None
+        self.image_is_source = True
         self.epoch = 0
         self.saving = False
         self.job_id = None
         self.loading_form = False
         self.preview_pending = False
+        self.session = 0
+        self.follow_progress = True
+        self.syncing = False
         self.undo = QUndoStack(self)
         self.undo.setUndoLimit(100)
         self.pool = QThreadPool.globalInstance()
@@ -268,9 +327,13 @@ class MangaPage(QWidget):
             lambda: self.import_images(folder=True)
         )
         self.start_page.drop_card.pathsDropped.connect(self.import_paths)
-        self.start_page.history_list.itemDoubleClicked.connect(
+        self.start_page.history_list.itemClicked.connect(
             lambda item: self.open_workspace(item.data(Qt.UserRole))
         )
+        self.start_page.history_list.itemActivated.connect(
+            lambda item: self.open_workspace(item.data(Qt.UserRole))
+        )
+        self.start_page.deleteRequested.connect(self.delete_workspace)
         self.workspace_stack.addWidget(self.start_page)
         self.work_page = QWidget(self)
         self.workspace_stack.addWidget(self.work_page)
@@ -306,6 +369,8 @@ class MangaPage(QWidget):
         commands.addLayout(actions)
         self.button(actions, "保存", self.save)
         self.button(actions, "导出", self.export)
+        self.button(actions, "导出原文", lambda: self.export_translation(True))
+        self.button(actions, "导出译文", lambda: self.export_translation(False))
         self.button(actions, "导入译文", self.import_translation)
         self.button(actions, "撤销", self.undo.undo)
         self.button(actions, "重做", self.undo.redo)
@@ -315,16 +380,22 @@ class MangaPage(QWidget):
         commands.addLayout(stages)
         self.scope = QComboBox()
         self.scope.addItems(["当前页", "全部页面", "选中文字框"])
+        self.scope.setCurrentIndex(1)
         stages.addWidget(self.scope)
         for label, stage in [
             ("检测", "detect"),
             ("OCR", "ocr"),
             ("翻译", "translate"),
-            ("去字", "clean"),
             ("排版预览", "render"),
             ("翻译并生成", "pipeline"),
         ]:
             self.button(stages, label, lambda checked=False, s=stage: self.run(s))
+        stages = QHBoxLayout()
+        commands.addLayout(stages)
+        self.precise = QCheckBox("精准去字（整个工程）")
+        self.precise.toggled.connect(self.toggle_precise)
+        stages.addWidget(self.precise)
+        self.button(stages, "跟随处理页", self.resume_follow)
         self.overwrite = QCheckBox("替换已有结果")
         stages.addWidget(self.overwrite)
         self.variant = QComboBox()
@@ -375,6 +446,8 @@ class MangaPage(QWidget):
         tools.addWidget(self.geometry)
         self.brush = QSpinBox()
         self.brush.setRange(1, 256)
+        self.brush.setFixedWidth(90)
+        self.brush.setToolTip("蒙版画笔半径")
         self.brush.setValue(8)
         self.brush.valueChanged.connect(lambda v: setattr(self.canvas, "radius", v))
         tools.addWidget(self.brush)
@@ -388,7 +461,7 @@ class MangaPage(QWidget):
         center_layout.addWidget(self.canvas, 1)
         split.addWidget(center)
         self.canvas.regionSelected.connect(self.select_region)
-        self.canvas.geometryChanged.connect(self.geometry_changed)
+        self.canvas.geometryChanged.connect(self.geometry_changed, Qt.QueuedConnection)
         self.canvas.boxCreated.connect(self.add_region)
         self.canvas.strokeCreated.connect(self.add_stroke)
         self.canvas.deleteRequested.connect(self.delete_regions)
@@ -456,10 +529,30 @@ class MangaPage(QWidget):
         self.provider.currentIndexChanged.connect(
             lambda: self.set_setting("provider_id", self.provider.currentData())
         )
-        self.regions = QListWidget()
-        self.regions.setMaximumHeight(140)
-        form.addRow("阅读顺序", self.regions)
-        self.regions.currentRowChanged.connect(self.region_row)
+        self.regions = QTableWidget()
+        self.regions.setColumnCount(4)
+        self.regions.setHorizontalHeaderLabels(["顺序", "OCR 原文", "译文", "状态"])
+        self.regions.setMinimumHeight(150)
+        self.regions.setWordWrap(True)
+        self.regions.setSelectionBehavior(QTableWidget.SelectRows)
+        self.regions.setColumnWidth(0, 60)
+        self.regions.setColumnWidth(3, 110)
+        self.regions.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.regions.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.regions.cellChanged.connect(self.review_changed)
+        vertical_split = QSplitter(Qt.Vertical)
+        root.removeWidget(split)
+        vertical_split.addWidget(split)
+        review = SimpleCardWidget()
+        review_layout = QVBoxLayout(review)
+        review_layout.addWidget(StrongBodyLabel("阅读顺序 · 点击文字框校对原文与译文"))
+        review_layout.addWidget(self.regions)
+        vertical_split.addWidget(review)
+        vertical_split.setSizes([650, 180])
+        root.addWidget(vertical_split, 1)
+        self.regions.currentCellChanged.connect(
+            lambda row, col, old_row, old_col: self.region_row(row)
+        )
         reorder = QHBoxLayout()
         self.button(reorder, "上移框", lambda: self.move_region(-1))
         self.button(reorder, "下移框", lambda: self.move_region(1))
@@ -553,7 +646,7 @@ class MangaPage(QWidget):
             ("保留原文", "none"),
         ]:
             self.removal.addItem(title, value)
-        form.addRow("原文处理", self.removal)
+        self.removal.hide()
         self.removal.currentIndexChanged.connect(
             lambda: self.region_value("removal", self.removal.currentData())
         )
@@ -571,6 +664,7 @@ class MangaPage(QWidget):
             if isinstance(label, NativeLabel) and not isinstance(label, QLabel):
                 replacement = QLabel(label.text(), right)
                 form.removeWidget(label)
+                label.hide()
                 label.deleteLater()
                 form.setWidget(row, QFormLayout.LabelRole, replacement)
         split.setSizes([160, 800, 310])
@@ -600,6 +694,8 @@ class MangaPage(QWidget):
         self.tasks.add(task)
 
         def done(result, error):
+            if sip.isdeleted(self):
+                return
             self.tasks.discard(task)
             if error:
                 self.status.setText(error)
@@ -624,10 +720,6 @@ class MangaPage(QWidget):
                     for d in result["workspaces"]
                 ]
             )
-            for button in self.start_page.history_list.findChildren(
-                TransparentToolButton
-            ):
-                button.hide()
 
         self.background(lambda: self.client.request("GET"), loaded)
 
@@ -650,21 +742,32 @@ class MangaPage(QWidget):
         self.open_workspace(self.history.currentData())
 
     def open_workspace(self, identifier):
-        if self.job_id or self.submitting or not self.prepare_to_leave():
+        if self.dirty or self.saving:
+            self.save(lambda: self.open_workspace(identifier))
             return
         if identifier:
+            self.detach_job()
+            session = self.session
             self.background(
                 lambda: self.client.request("GET", "/" + identifier),
-                lambda r: self.loaded(r["workspace"]),
+                lambda r: (
+                    self.loaded(r["workspace"]) if session == self.session else None
+                ),
             )
 
     def back_to_start(self):
-        if not self.prepare_to_leave():
+        if self.dirty or self.saving:
+            self.save(self.back_to_start)
             return
+        self.detach_job()
         self.workspace_stack.setCurrentWidget(self.start_page)
         self.refresh_history()
 
     def loaded(self, document):
+        self.session += 1
+        self.variant.blockSignals(True)
+        self.variant.setCurrentIndex(0)
+        self.variant.blockSignals(False)
         self.workspace_stack.setCurrentWidget(self.work_page)
         self.save_timer.stop()
         self.dirty = False
@@ -699,9 +802,11 @@ class MangaPage(QWidget):
         self.pages.blockSignals(False)
         self.refresh_regions()
 
+    @form_update
     def populate_settings(self):
         self.loading_form = True
         s = self.document["settings"]
+        self.precise.setChecked(s.get("removal") == "precise")
         self.detector.setCurrentText(s["detector"])
         self.ocr.setCurrentText(s["ocr"])
         self.panels.setChecked(s["detect_panels"])
@@ -738,21 +843,51 @@ class MangaPage(QWidget):
     def select_page(self, index):
         if not self.document or index < 0:
             return
+        self.follow_progress = False
         self.page_id = self.document["pages"][index]["id"]
+        self.image_data = None
+        self.canvas.scene().clear()
         self.selected = None
         self.refresh_regions()
         self.load_image()
 
     def refresh_regions(self):
         self.regions.blockSignals(True)
-        self.regions.clear()
-        for r in sorted(
+        try:
+            regions = sorted(
+                (self.page() or {}).get("regions", []), key=lambda r: r["order"]
+            )
+            self.regions.setRowCount(len(regions))
+            for row, r in enumerate(regions):
+                state = (
+                    "已翻译" if r["target"] else "待翻译" if r["source"] else "待识别"
+                )
+                for col, text in enumerate(
+                    [str(row + 1), r["source"], r["target"], state]
+                ):
+                    item = QTableWidgetItem(text)
+                    if col in {0, 3}:
+                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    item.setToolTip(text)
+                    self.regions.setItem(row, col, item)
+                self.regions.setRowHeight(row, 64)
+                if r["id"] == self.selected:
+                    self.regions.setCurrentCell(row, 1)
+        finally:
+            self.regions.blockSignals(False)
+
+    def review_changed(self, row, column):
+        if self.loading_form or column not in {1, 2}:
+            return
+        regions = sorted(
             (self.page() or {}).get("regions", []), key=lambda r: r["order"]
-        ):
-            self.regions.addItem(f"{r['order'] + 1}. {r['source'][:24] or '待识别'}")
-            if r["id"] == self.selected:
-                self.regions.setCurrentRow(self.regions.count() - 1)
-        self.regions.blockSignals(False)
+        )
+        if 0 <= row < len(regions):
+            self.selected = regions[row]["id"]
+            self.region_value(
+                "source" if column == 1 else "target",
+                self.regions.item(row, column).text(),
+            )
 
     def region_row(self, index):
         regions = sorted(
@@ -762,6 +897,7 @@ class MangaPage(QWidget):
             self.select_region(regions[index]["id"])
             self.draw_canvas()
 
+    @form_update
     def select_region(self, identifier):
         self.selected = identifier
         r = self.region()
@@ -801,7 +937,14 @@ class MangaPage(QWidget):
             if self.selected not in selected:
                 selected = [self.selected] if self.selected else []
             self.canvas.blockSignals(True)
-            self.canvas.display(self.image_data, self.page(), selected)
+            data = self.image_data
+            if (
+                self.image_is_source
+                and self.variant.currentData() == "render"
+                and self.document["settings"].get("removal") != "precise"
+            ):
+                data = self.fill_preview(data)
+            self.canvas.display(data, self.page(), selected)
             self.canvas.blockSignals(False)
 
     def load_image(self):
@@ -812,7 +955,7 @@ class MangaPage(QWidget):
             self.page_id,
             self.variant.currentData(),
         )
-        ticket = (doc, page, variant, self.document["revision"])
+        ticket = (self.session, doc, page, variant, self.document["revision"])
         self.image_ticket = ticket
 
         def loaded(data):
@@ -824,7 +967,29 @@ class MangaPage(QWidget):
             if fit:
                 self.canvas.fitInView(self.canvas.sceneRect(), Qt.KeepAspectRatio)
 
-        self.background(lambda: self.client.asset(doc, page, variant), loaded)
+        def fetch():
+            if variant != "source":
+                response = self.client.backend.http.get(
+                    f"/api/v2/manga/{doc}/pages/{page}/{variant}", timeout=60
+                )
+                if response.status_code == 404:
+                    return self.client.asset(doc, page, "source"), True
+                response.raise_for_status()
+                return response.content, False
+            return self.client.asset(doc, page, "source"), False
+
+        def ready(result):
+            if self.image_ticket != ticket:
+                return
+            data, pending = result
+            self.image_is_source = pending or variant == "source"
+            loaded(data)
+            if pending and self.document["settings"].get("removal") == "precise":
+                self.status.setText(
+                    "当前页显示原图与文字框，精准预览尚未生成；可点击排版预览。"
+                )
+
+        self.background(fetch, ready)
 
     def change_tool(self, index):
         self.canvas.mode = ["select", "add", "mask", "eraser"][index]
@@ -845,6 +1010,7 @@ class MangaPage(QWidget):
             ):
                 region["order"] = order
         if before != after:
+            self.document = before
             self.undo.push(EditCommand(self, before, after, label))
 
     def apply_edit(self, document):
@@ -885,6 +1051,10 @@ class MangaPage(QWidget):
             self.preview_pending = True
 
     def geometry_changed(self, identifier, key, rect):
+        if not any(
+            r["id"] == identifier for r in (self.page() or {}).get("regions", [])
+        ):
+            return
         self.selected = identifier
         self.edit("调整区域", lambda: self.region().__setitem__(key, rect))
         self.preview_pending = True
@@ -900,40 +1070,40 @@ class MangaPage(QWidget):
     def add_region(self, rect):
         if not self.page():
             return
-        region = dict(
-            id=uuid4().hex,
-            ocr_rect=dict(rect),
-            erase_rect=dict(rect),
-            layout_rect=dict(rect),
-            source="",
-            target="",
-            source_locked=False,
-            target_locked=False,
-            geometry_locked=False,
-            order=len(self.page()["regions"]),
-            panel_id=None,
-            confidence=None,
-            removal=self.document["settings"]["removal"],
-            fill_color="auto",
-            fill_opacity=1,
-            mask_strokes=[],
-            warnings=[],
-            style=dict(
-                font="",
-                size=28,
-                min_size=10,
-                autofit=True,
-                vertical=False,
-                bold=False,
-                color="#000000",
-                stroke_color="#ffffff",
-                stroke_width=0,
-                line_spacing=1.2,
-                char_spacing=0,
-                padding=4,
-                align="center",
-            ),
-        )
+        region = {
+            "id": uuid4().hex,
+            "ocr_rect": dict(rect),
+            "erase_rect": dict(rect),
+            "layout_rect": dict(rect),
+            "source": "",
+            "target": "",
+            "source_locked": False,
+            "target_locked": False,
+            "geometry_locked": False,
+            "order": len(self.page()["regions"]),
+            "panel_id": None,
+            "confidence": None,
+            "removal": self.document["settings"]["removal"],
+            "fill_color": "auto",
+            "fill_opacity": 1,
+            "mask_strokes": [],
+            "warnings": [],
+            "style": {
+                "font": "",
+                "size": 28,
+                "min_size": 10,
+                "autofit": True,
+                "vertical": False,
+                "bold": False,
+                "color": "#000000",
+                "stroke_color": "#ffffff",
+                "stroke_width": 0,
+                "line_spacing": 1.2,
+                "char_spacing": 0,
+                "padding": 4,
+                "align": "center",
+            },
+        }
         self.selected = region["id"]
         self.edit("建立文字框", lambda: self.page()["regions"].append(region))
         self.select_region(region["id"])
@@ -957,7 +1127,7 @@ class MangaPage(QWidget):
 
         def action():
             self.region()["mask_strokes"].append(stroke)
-            self.region()["removal"] = "precise"
+            self.document["settings"]["removal"] = "precise"
 
         self.edit("编辑文字蒙版", action)
         self.preview_pending = True
@@ -1086,19 +1256,19 @@ class MangaPage(QWidget):
             return
         if callable(callback):
             self.save_callbacks.append(callback)
-        if self.job_id or self.submitting:
-            self.save_timer.stop()
-            return
         if self.saving:
             self.save_timer.start()
             return
         if not self.dirty:
+            self.status.setText("已保存，没有新的修改")
             callbacks, self.save_callbacks = self.save_callbacks, []
             for action in callbacks:
                 action()
             return
         self.save_timer.stop()
         self.saving = True
+        self.status.setText("正在保存…")
+        session = self.session
         base = deepcopy(self.document)
         epoch = self.epoch
 
@@ -1121,13 +1291,17 @@ class MangaPage(QWidget):
                 and not self.submitting
             ):
                 self.preview_pending = False
-                self.run("render", saved=True)
+                self.run("render", saved=True, preview=True)
 
         task = Background(lambda: self.client.save(base))
         self.tasks.add(task)
 
         def complete(result, error):
+            if sip.isdeleted(self):
+                return
             self.tasks.discard(task)
+            if session != self.session:
+                return
             if error:
                 self.saving = False
                 self.save_callbacks = []
@@ -1189,25 +1363,29 @@ class MangaPage(QWidget):
         }
         if append:
             payload["workspace_id"] = self.document["id"]
+
+        def imported(result):
+            self.loaded(result["workspace"])
+            self.refresh_history()
+            if self.document["settings"].get("auto_recognize"):
+                self.follow_progress = True
+                self.run("recognize")
+
         self.start_request(
             lambda: self.client.request(
                 "POST", "/import", json=payload, headers={"Prefer": "respond-async"}
             ),
-            lambda result: (
-                self.loaded(result["workspace"]),
-                self.refresh_history(),
-                self.show_report(result),
-            ),
+            imported,
         )
 
-    def run(self, stage, saved=False):
+    def run(self, stage, saved=False, preview=False):
         if not self.document or self.job_id or self.submitting:
             return
         if not saved:
-            self.save(lambda: self.run(stage, True))
+            self.save(lambda: self.run(stage, True, preview))
             return
-        scope = self.scope.currentIndex()
-        pages = [] if scope == 1 else [self.page_id]
+        scope = 0 if preview else self.scope.currentIndex()
+        pages = [] if scope == 1 or stage == "recognize" else [self.page_id]
         regions = self.canvas.selected_ids() if scope == 2 else []
         if scope == 2 and not regions:
             self.status.setText("请先选中文字框")
@@ -1224,7 +1402,11 @@ class MangaPage(QWidget):
             return
         base = deepcopy(self.document)
 
+        session = self.session
+
         def completed(result):
+            if session != self.session:
+                return
             self.saved_snapshot = deepcopy(result["workspace"])
             self.document = merge_edits(base, self.document, result["workspace"])
             self.refresh_pages()
@@ -1261,9 +1443,12 @@ class MangaPage(QWidget):
             return
         self.submitting = True
         self.job_base = deepcopy(self.document)
+        session = self.session
         self.status.setText("正在提交任务…")
 
         def started(result):
+            if session != self.session:
+                return
             self.submitting = False
             job = result.get("job", {})
             self.job_id = job.get("id") or job.get("job_id")
@@ -1277,6 +1462,8 @@ class MangaPage(QWidget):
         self.tasks.add(task)
 
         def done(result, error):
+            if sip.isdeleted(self):
+                return
             self.tasks.discard(task)
             self.submitting = False
             if error:
@@ -1295,6 +1482,8 @@ class MangaPage(QWidget):
 
         def loaded(result):
             self.polling = False
+            if identifier != self.job_id:
+                return
             job = result["job"]
             state = {
                 "queued": "排队中",
@@ -1306,6 +1495,8 @@ class MangaPage(QWidget):
                 "interrupted": "任务已中断",
             }.get(job["state"], job["state"])
             progress = job.get("progress") or {}
+            if job["state"] == "running" and self.document:
+                self.sync_progress(progress)
             detail = ""
             if "downloaded_bytes" in progress:
                 detail = f"下载 {progress['downloaded_bytes'] / 1024**2:.1f} MB"
@@ -1351,6 +1542,8 @@ class MangaPage(QWidget):
         self.tasks.add(task)
 
         def done(result, error):
+            if sip.isdeleted(self):
+                return
             self.tasks.discard(task)
             if error:
                 self.polling = False
@@ -1374,7 +1567,15 @@ class MangaPage(QWidget):
     def recover_workspace(self, baseline=None):
         base = deepcopy(baseline or self.saved_snapshot)
 
+        session = self.session
+
         def recovered(result):
+            if (
+                session != self.session
+                or not self.document
+                or self.document["id"] != base["id"]
+            ):
+                return
             # A failed job may have committed earlier pages. Keep human edits and
             # advance the revision before retrying any save.
             remote = result["workspace"]
@@ -1445,6 +1646,158 @@ class MangaPage(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "选择新的导出目录")
         if folder:
             mode = ["png", "jpeg", "zip", "project", "i18next"][labels.index(label)]
+            self.save(
+                lambda: self.start_request(
+                    lambda: self.client.request(
+                        "POST",
+                        f"/{self.document['id']}/export",
+                        json={"output_dir": folder, "mode": mode},
+                        headers={"Prefer": "respond-async"},
+                    ),
+                    lambda r: self.status.setText(
+                        "已导出：" + ", ".join(r.get("files", []))
+                    ),
+                )
+            )
+
+    def fill_preview(self, data):
+        image = QImage.fromData(data).convertToFormat(QImage.Format_ARGB32)
+        original = image.copy()
+        painter = QPainter(image)
+        for region in self.page()["regions"]:
+            if not region.get("target", "").strip():
+                continue
+            r = region["erase_rect"]
+            color = region.get("fill_color", "auto")
+            if color == "auto":
+                x, y = max(0, int(r["x"]) - 1), max(0, int(r["y"]) - 1)
+                color = original.pixelColor(x, y)
+            else:
+                color = QColor(color)
+            painter.fillRect(QRectF(r["x"], r["y"], r["width"], r["height"]), color)
+        for region in self.page()["regions"]:
+            if not region.get("target", "").strip():
+                continue
+            r, style = region["layout_rect"], region["style"]
+            painter.save()
+            painter.translate(r["x"] + r["width"] / 2, r["y"] + r["height"] / 2)
+            painter.rotate(r.get("rotation", 0))
+            font = QFont()
+            font.setPixelSize(style["size"])
+            font.setBold(style["bold"])
+            painter.setFont(font)
+            painter.setPen(QColor(style["color"]))
+            painter.drawText(
+                QRectF(-r["width"] / 2, -r["height"] / 2, r["width"], r["height"]),
+                Qt.AlignCenter | Qt.TextWordWrap,
+                region["target"],
+            )
+            painter.restore()
+        painter.end()
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        image.save(buffer, "PNG")
+        return bytes(buffer.data())
+
+    def toggle_precise(self, checked):
+        if self.loading_form or not self.document:
+            return
+        self.set_setting("removal", "precise" if checked else "fill")
+        if self.variant.currentData() in {"render", "clean"}:
+            self.variant.setCurrentIndex(self.variant.findData("render"))
+            self.load_image()
+        self.preview_pending = True
+        self.status.setText("已启用精准去字" if checked else "已切回色块遮挡")
+
+    def resume_follow(self):
+        self.follow_progress = True
+        self.status.setText("正在跟随处理页面；手动切页可暂停跟随")
+
+    def sync_progress(self, progress):
+        if self.syncing or not self.document:
+            return
+        self.syncing = True
+        session, workspace_id = self.session, self.document["id"]
+
+        def sync():
+            try:
+                return self.client.request("GET", "/" + workspace_id)
+            except Exception:
+                return None
+
+        def ready(result):
+            self.syncing = False
+            if session != self.session or not result:
+                return
+            remote = result["workspace"]
+            if remote["revision"] == self.saved_snapshot["revision"]:
+                return
+            self.document = merge_edits(self.saved_snapshot, self.document, remote)
+            self.saved_snapshot = deepcopy(remote)
+            if (
+                self.follow_progress
+                and progress.get("page_id")
+                and self.page_id != progress["page_id"]
+            ):
+                self.page_id = progress["page_id"]
+                self.image_data = None
+            self.refresh_pages()
+            self.select_region(self.selected)
+            self.load_image()
+
+        self.background(sync, ready)
+
+    def detach_job(self):
+        self.session += 1
+        self.poll_timer.stop()
+        self.job_id = None
+        self.submitting = False
+        self.polling = False
+        self.syncing = False
+        self.preview_pending = False
+        self.save_callbacks = []
+
+    def delete_workspace(self, workspace_id, title):
+        if (
+            QMessageBox.question(
+                self,
+                "删除漫画工程",
+                f"永久删除“{title}”的工程、识别结果和缓存？原始图片及导出文件会保留。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        if self.job_id and self.document and self.document["id"] == workspace_id:
+            self.cancel_job()
+            self.detach_job()
+
+        def deleted(_):
+            if self.document and self.document["id"] == workspace_id:
+                self.document = None
+                self.image_data = None
+                self.dirty = False
+                self.undo.clear()
+                self.canvas.scene().clear()
+                self.workspace_stack.setCurrentWidget(self.start_page)
+            self.refresh_history()
+            self.status.setText("工程已永久删除，原始图片和导出文件保留")
+
+        self.status.setText("正在删除工程，等待当前推理安全结束…")
+        self.background(
+            lambda: self.client.request("DELETE", "/" + workspace_id, timeout=600),
+            deleted,
+        )
+
+    def export_translation(self, source):
+        if not self.document:
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, "选择原文导出目录" if source else "选择译文导出目录"
+        )
+        if folder:
+            mode = "i18next-source" if source else "i18next-target"
             self.save(
                 lambda: self.start_request(
                     lambda: self.client.request(

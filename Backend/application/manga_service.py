@@ -4,15 +4,16 @@ import concurrent.futures
 import hashlib
 import json
 import multiprocessing
-from pathlib import Path
 import threading
 import zipfile
+from pathlib import Path
+
 from PIL import Image
 
 from Backend.application.execution_context import ExecutionContext
 from Backend.application.manga_store import MangaStore, atomic_json
 from Backend.application.pipeline_common import PipelineError
-from Backend.domain.models.manga import Region, Rect, identifier
+from Backend.domain.models.manga import Rect, Region, identifier
 from Backend.infrastructure.manga.models import ModelRegistry
 
 
@@ -42,8 +43,9 @@ class MangaService:
             self._pool.shutdown(wait=True, cancel_futures=True)
 
     def compute(self, context, **kwargs):
-        from Backend.infrastructure.manga.engines import worker
         from concurrent.futures.process import BrokenProcessPool
+
+        from Backend.infrastructure.manga.engines import worker
 
         self.cancelled(context)
 
@@ -90,7 +92,7 @@ class MangaService:
         context, options = context or ExecutionContext(), options or {}
         stages = {
             "recognize": ["detect", "ocr"],
-            "pipeline": ["translate", "clean", "render"],
+            "pipeline": ["translate", "render"],
         }.get(stage, [stage])
         if "detect" in stages and region_ids:
             raise PipelineError(
@@ -100,12 +102,80 @@ class MangaService:
             s not in {"detect", "ocr", "translate", "clean", "render"} for s in stages
         ):
             raise PipelineError("INVALID_MANGA_STAGE", "未知漫画处理阶段", 422)
+        # Recognize each page completely before advancing to the next page.
+        if stage == "recognize":
+            document = self.store.load(workspace_id)
+            reports = {"completed": [], "errors": [], "warnings": []}
+            pages = [p for p in document.pages if not page_ids or p.id in page_ids]
+            for index, page in enumerate(pages):
+                from dataclasses import replace
+
+                def progress(value, index=index, page_id=page.id):
+                    if context.on_progress:
+                        context.on_progress(
+                            {
+                                **value,
+                                "page_id": page_id,
+                                "current": index + 1,
+                                "total": len(pages),
+                            }
+                        )
+
+                page_context = replace(context, on_progress=progress)
+                for part in ("detect", "ocr"):
+                    result = self.run(
+                        workspace_id,
+                        part,
+                        context=page_context,
+                        page_ids=[page.id],
+                        options=options,
+                    )
+                    for key, values in reports.items():
+                        values.extend(result["report"][key])
+                if context.on_progress:
+                    context.on_progress(
+                        {
+                            "stage": "recognize",
+                            "page_id": page.id,
+                            "current": index + 1,
+                            "total": len(pages),
+                        }
+                    )
+            return {
+                "status": "partial" if reports["errors"] else "success",
+                "workspace": self.store.load(workspace_id).model_dump(),
+                "report": reports,
+            }
         report = {"completed": [], "errors": [], "warnings": []}
         for operation in stages:
             document = self.store.load(workspace_id)
             pages = [p for p in document.pages if not page_ids or p.id in page_ids]
             if not pages:
                 raise PipelineError("MANGA_PAGE_MISSING", "没有匹配的漫画页面", 422)
+            if operation == "translate":
+                selected = [
+                    r
+                    for p in pages
+                    for r in sorted(p.regions, key=lambda r: r.order)
+                    if not region_ids or r.id in region_ids
+                ]
+                result = self.translate(document, pages[0], selected, context, options)
+                if result:
+                    report["warnings"].extend(result.get("failed_items", []))
+                with self.store.lock:
+                    current = self.store.load(workspace_id)
+                    for live_page in current.pages:
+                        if any(p.id == live_page.id for p in pages):
+                            live_page.stages["translate"] = {
+                                "status": "partial"
+                                if result and result.get("failed_items")
+                                else "complete"
+                            }
+                    self.store.save(current, current.revision)
+                report["completed"].extend(
+                    {"page_id": p.id, "stage": operation} for p in pages
+                )
+                continue
             for index, page in enumerate(pages):
                 self.cancelled(context)
                 page_id = page.id
@@ -225,7 +295,8 @@ class MangaService:
                             ):
                                 continue
                             r = region.ocr_rect
-                            region.source = self.compute(
+                            before = region.model_copy(deep=True)
+                            text = self.compute(
                                 context,
                                 operation="ocr",
                                 image_path=str(source),
@@ -233,19 +304,55 @@ class MangaService:
                                 model_id=document.settings.ocr,
                                 rect=[r.x, r.y, r.width, r.height],
                             )
-                            region.warnings = (
-                                []
-                                if region.source.strip()
-                                else ["OCR 未识别出文字，请检查或重画区域"]
-                            )
-                    elif operation == "translate":
-                        translation_report = self.translate(
-                            document, page, selected, context, options
-                        )
-                        if translation_report:
-                            report["warnings"].extend(
-                                translation_report.get("failed_items", [])
-                            )
+                            with self.store.lock:
+                                current = self.store.load(workspace_id)
+                                live_page = next(
+                                    (p for p in current.pages if p.id == page_id), None
+                                )
+                                live = (
+                                    next(
+                                        (
+                                            r
+                                            for r in live_page.regions
+                                            if r.id == before.id
+                                        ),
+                                        None,
+                                    )
+                                    if live_page
+                                    else None
+                                )
+                                if (
+                                    live
+                                    and not live.source_locked
+                                    and live.source == before.source
+                                    and live.ocr_rect == before.ocr_rect
+                                ):
+                                    live.source = text
+                                    live.warnings = (
+                                        []
+                                        if text.strip()
+                                        else ["OCR 未识别出文字，请检查或重画区域"]
+                                    )
+                                    current = self.store.save(current, current.revision)
+                                document = current
+                                revision = current.revision
+                                page = next(
+                                    (p for p in current.pages if p.id == page_id), None
+                                )
+                                if page is None:
+                                    raise PipelineError(
+                                        "MANGA_CHANGED", "处理期间页面已删除", 409
+                                    )
+                            if context.on_progress:
+                                context.on_progress(
+                                    {
+                                        "stage": "ocr",
+                                        "page_id": page_id,
+                                        "region_id": before.id,
+                                        "current": index + 1,
+                                        "total": len(pages),
+                                    }
+                                )
                     else:
                         self.render(
                             document,
@@ -253,7 +360,7 @@ class MangaService:
                             revision + 1,
                             report,
                             context,
-                            erase_untranslated=operation == "clean",
+                            erase_untranslated=False,
                         )
                     page.stages[operation] = {
                         "status": "complete",
@@ -282,7 +389,12 @@ class MangaService:
                     )
                 if context.on_progress:
                     context.on_progress(
-                        {"stage": operation, "current": index + 1, "total": len(pages)}
+                        {
+                            "stage": operation,
+                            "page_id": page_id,
+                            "current": index + 1,
+                            "total": len(pages),
+                        }
                     )
         return {
             "status": "partial" if report["errors"] else "success",
@@ -295,20 +407,17 @@ class MangaService:
         from Backend.core.protocol import to_wire
         from Backend.domain.languages import map_language_code_to_name
 
-        selected = sorted(
-            [
-                r
-                for r in regions
-                if r.source.strip()
-                and not r.target_locked
-                and (not r.target or options.get("retranslate"))
-            ],
-            key=lambda r: r.order,
-        )
+        selected = [
+            r
+            for r in regions
+            if r.source.strip()
+            and not r.target_locked
+            and (not r.target or options.get("retranslate"))
+        ]
         if not selected:
             return
         dialogue = {r.id: r.source for r in selected}
-        path = self.store.directory(document.id) / f"{page.id}.translation-source.json"
+        path = self.store.directory(document.id) / "translation-source.json"
         atomic_json(path, dialogue)
         file_id = identifier()
         model = {
@@ -335,7 +444,11 @@ class MangaService:
                             "locator": {"kind": "document", "index": i},
                             "extra": {
                                 "manga_region_id": r.id,
-                                "manga_page_id": page.id,
+                                "manga_page_id": next(
+                                    p.id
+                                    for p in document.pages
+                                    if any(v.id == r.id for v in p.regions)
+                                ),
                             },
                         }
                         for i, r in enumerate(selected)
@@ -355,8 +468,41 @@ class MangaService:
             config["provider_id"] = document.settings.provider_id
         from dataclasses import replace
 
+        original = {r.id: r.model_copy(deep=True) for r in selected}
+
+        def commit_items(items, *_):
+            from Backend.core.protocol import to_wire
+
+            items = [to_wire(item) for item in items]
+            self.cancelled(context)
+            with self.store.lock:
+                current = self.store.load(document.id)
+                live = {r.id: r for p in current.pages for r in p.regions}
+                changed = False
+                for item in items:
+                    key = item.get("item_id")
+                    region, before = live.get(key), original.get(key)
+                    value = item.get("translated_text")
+                    if (
+                        region
+                        and before
+                        and value
+                        and not region.target_locked
+                        and region.source == before.source
+                        and region.target == before.target
+                    ):
+                        region.target = value
+                        original[key] = region.model_copy(deep=True)
+                        changed = True
+                if changed:
+                    self.store.save(current, current.revision)
+            if context.on_batch_complete:
+                context.on_batch_complete(items, *_)
+
         stage_context = replace(
-            context, cancel_event=StageCancellation(context.cancel_event)
+            context,
+            cancel_event=StageCancellation(context.cancel_event),
+            on_batch_complete=commit_items,
         )
         result = translate_model(model, config=config, context=stage_context)
         translated = to_wire(result["model"])
@@ -374,15 +520,15 @@ class MangaService:
                 409,
                 result.get("report"),
             )
-        for region in selected:
-            value = by_id.get(region.id, {}).get("translated_text")
-            if value:
-                region.target = value
+        commit_items(list(by_id.values()))
         return result.get("report", {})
 
     def render(
         self, document, page, revision, report, context=None, erase_untranslated=False
     ):
+        page_data = page.model_copy(deep=True)
+        for region in page_data.regions:
+            region.removal = document.settings.removal
         warnings = self.compute(
             context or ExecutionContext(),
             operation="render",
@@ -390,8 +536,8 @@ class MangaService:
             folder=str(getattr(self.models, "root", "")),
             model_id="",
             render_data={
-                "page": page.model_dump(),
-                "revision": revision,
+                "page": page_data.model_dump(),
+                "revision": self.store.preview_key(page, document.settings),
                 "directory": str(self.store.directory(document.id)),
                 "bundled": str(getattr(self.models, "bundled", "")),
                 "erase_untranslated": erase_untranslated,
@@ -432,11 +578,14 @@ class MangaService:
         document = self.store.load(workspace_id)
         output = Path(output_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
-        if mode == "i18next":
+        if mode in {"i18next", "i18next-source", "i18next-target"}:
+            source = mode == "i18next-source"
             values = {
-                r.id: r.target or r.source for p in document.pages for r in p.regions
+                r.id: r.source if source else r.target
+                for p in document.pages
+                for r in sorted(p.regions, key=lambda r: r.order)
             }
-            target = output / f"{document.id}.json"
+            target = output / f"{document.id}.{'source' if source else 'target'}.json"
             if target.exists():
                 raise PipelineError(
                     "OUTPUT_EXISTS", "导出文件已存在，请使用新目录", 409

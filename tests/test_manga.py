@@ -1,18 +1,19 @@
 """Manga persistence, task boundaries, editing merge and export contracts."""
 
-from copy import deepcopy
 import json
-from pathlib import Path
 import zipfile
-import pytest
+from copy import deepcopy
+from pathlib import Path
+
 import numpy as np
+import pytest
 from PIL import Image, ImageDraw
 
 from Backend.application.execution_context import ExecutionContext
-from Backend.application.manga_store import MangaStore
 from Backend.application.manga_service import MangaService
+from Backend.application.manga_store import MangaStore
 from Backend.application.pipeline_common import PipelineError
-from Backend.domain.models.manga import Region, Rect, MangaWorkspace
+from Backend.domain.models.manga import MangaWorkspace, Rect, Region
 from Backend.infrastructure.manga.models import ModelRegistry
 from Backend.infrastructure.manga.render import clean_page
 from Frontend.services.manga_merge import merge_edits
@@ -149,9 +150,9 @@ def test_panel_is_not_a_text_region(workspace):
 
 
 def test_translation_adapter_validates_real_intermediate_schema(workspace, monkeypatch):
-    from Backend.domain.models.intermediate import parse_model
     from Backend.application import translation_service
     from Backend.core.protocol import to_wire
+    from Backend.domain.models.intermediate import parse_model
 
     store, doc = workspace
     calls = []
@@ -313,3 +314,95 @@ def test_cancelled_export_publishes_nothing(workspace, tmp_path):
     with pytest.raises(PipelineError):
         service.export(doc.id, str(output), context=context)
     assert not list(output.iterdir())
+
+
+def test_project_translation_combines_pages_and_commits_batches(workspace, monkeypatch):
+    from Backend.application import translation_service
+    from Backend.core.protocol import to_wire
+    from Backend.domain.models.intermediate import parse_model
+
+    store, doc = workspace
+    for page in doc.pages:
+        page.regions[0].target = ""
+    doc = store.save(doc, doc.revision)
+    calls = []
+
+    def translate(model, config, context):
+        project = parse_model(model)
+        items = project.files["dialogue.json"].items
+        calls.append((len(items), config))
+        assert len(items) == 2  # both pages share the original text batch scheduler
+        items[0].translated_text = "first batch"
+        context.on_batch_complete([items[0]], "dialogue.json", {})
+        live = store.load(doc.id)
+        assert live.pages[0].regions[0].target == "first batch"
+        # Human target changes made during translation must survive late results.
+        live.pages[1].regions[0].target = "human correction"
+        store.save(live, live.revision)
+        items[1].translated_text = "late machine result"
+        return {"model": to_wire(project), "status": "success"}
+
+    monkeypatch.setattr(translation_service, "translate_model", translate)
+    result = MangaService(store, StubModels()).run(doc.id, "translate")
+    assert len(calls) == 1
+    assert not any(
+        k in calls[0][1] for k in ("tokens_limit", "lines_limit", "user_thread_counts")
+    )
+    assert result["workspace"]["pages"][1]["regions"][0]["target"] == "human correction"
+
+
+def test_recognize_is_page_order_and_exposes_each_ocr(workspace, monkeypatch):
+    store, doc = workspace
+    for page in doc.pages:
+        page.regions[0].source = ""
+    doc = store.save(doc, doc.revision)
+    service = MangaService(store, StubModels())
+    observed = []
+
+    def compute(context, **kw):
+        if kw["operation"] == "ocr":
+            observed.append(kw["image_path"])
+            if len(observed) == 2:
+                assert store.load(doc.id).pages[0].regions[0].source == "recognized"
+            return "recognized"
+        raise AssertionError(kw)
+
+    monkeypatch.setattr(service, "compute", compute)
+    progress = []
+    result = service.run(
+        doc.id, "recognize", context=ExecutionContext(on_progress=progress.append)
+    )
+    assert not result["report"]["errors"]
+    assert [Path(p).name for p in observed] == [p.source for p in doc.pages]
+    assert any(p.get("region_id") for p in progress)
+
+
+def test_preview_key_ignores_other_pages_and_ocr_but_tracks_pixels(workspace):
+    store, doc = workspace
+    page = doc.pages[0]
+    key = store.preview_key(page, doc.settings)
+    page.regions[0].source = "new OCR"
+    page.stages["ocr"] = {"status": "complete"}
+    assert store.preview_key(page, doc.settings) == key
+    page.regions[0].target = "new translation"
+    assert store.preview_key(page, doc.settings) != key
+    page.regions[0].target = "你好"
+    doc.settings.removal = "precise"
+    assert store.preview_key(page, doc.settings) != key
+
+
+def test_separate_translation_exports_and_permanent_delete(workspace, tmp_path):
+    store, doc = workspace
+    doc.pages[0].regions[0].target = ""
+    doc = store.save(doc, doc.revision)
+    service = MangaService(store, StubModels())
+    source = service.export(doc.id, tmp_path / "out", "i18next-source")["files"][0]
+    target = service.export(doc.id, tmp_path / "out", "i18next-target")["files"][0]
+    key = doc.pages[0].regions[0].id
+    assert json.loads(Path(source).read_text(encoding="utf-8"))[key] == "こんにちは"
+    assert json.loads(Path(target).read_text(encoding="utf-8"))[key] == ""
+    original = tmp_path / "input" / "page2.png"
+    store.delete(doc.id)
+    assert original.exists() and Path(source).exists()
+    with pytest.raises(PipelineError):
+        store.load(doc.id)

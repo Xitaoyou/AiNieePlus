@@ -60,12 +60,12 @@ jobs:
         run: python -m Tools.prepare_manga_models --download
 
       - name: Verify manga backend workflows
-        run: python -m pytest tests/test_manga.py tests/test_manga_api.py -q
+        run: python Tools/run_manga_tests.py tests/test_manga.py tests/test_manga_api.py -q
 
       - name: Verify manga Fluent editor
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest tests/test_manga_editor.py -q
+        run: python Tools/run_manga_tests.py tests/test_manga_editor.py -q
 
       - name: Cache bundled FFmpeg
         id: ffmpeg-cache
@@ -114,6 +114,7 @@ jobs:
           Copy-Item LICENSE dist/AiNiee/LICENSE
           New-Item -ItemType Directory -Path dist/AiNiee/docs -Force | Out-Null
           Copy-Item docs/manga.md dist/AiNiee/docs/manga.md
+          Copy-Item docs/images dist/AiNiee/docs/images -Recurse
           $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path -LiteralPath $compiler)) {
             choco install innosetup -y --no-progress

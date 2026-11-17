@@ -60,6 +60,7 @@ def main():
             removal="precise",
         )
     ]
+    doc.settings.removal = "precise"
     doc = store.save(doc, doc.revision)
     clean, mask = clean_page(image, doc.pages[0], models)
     outside = np.asarray(mask) == 0

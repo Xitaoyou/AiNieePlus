@@ -3,15 +3,16 @@
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import threading
+from pathlib import Path
 from uuid import uuid4
+
 from PIL import Image, ImageOps
 
 from Backend.application.pipeline_common import PipelineError
-from Backend.domain.models.manga import MangaWorkspace, MangaPage, MangaSettings
+from Backend.domain.models.manga import MangaPage, MangaSettings, MangaWorkspace
 
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -88,23 +89,6 @@ class MangaStore:
             clean = MangaWorkspace.model_validate(document.model_dump())
             clean.revision = current.revision + 1
             directory = self.directory(clean.id)
-            # A workspace revision changes even when only another page changed.
-            # Carry forward unchanged page assets, so batch previews stay valid.
-            previous_pages = {p.id: p for p in current.pages}
-            for page in clean.pages:
-                if page.id in previous_pages and page == previous_pages[page.id]:
-                    for variant in ("clean", "render", "mask", "layer"):
-                        old_asset = (
-                            directory / f"{page.id}.{current.revision}.{variant}.png"
-                        )
-                        new_asset = (
-                            directory / f"{page.id}.{clean.revision}.{variant}.png"
-                        )
-                        if old_asset.is_file() and not new_asset.exists():
-                            try:
-                                os.link(old_asset, new_asset)
-                            except OSError:
-                                shutil.copyfile(old_asset, new_asset)
             atomic_json(directory / "previous.json", current.model_dump())
             atomic_json(directory / "project.json", clean.model_dump())
             return clean
@@ -126,6 +110,40 @@ class MangaStore:
             except (ValueError, OSError):
                 continue
         return result
+
+    def delete(self, workspace_id):
+        with self.lock:
+            self.load(workspace_id)
+            directory = self.directory(workspace_id).resolve()
+            if directory.parent != self.root.resolve():
+                raise PipelineError("INVALID_MANGA_ID", "工程目录无效", 422)
+            shutil.rmtree(directory)
+
+    @staticmethod
+    def preview_key(page, settings):
+        # Only pixel-producing inputs matter; OCR progress and other pages do not.
+        values = {
+            "source": page.sha256,
+            "removal": settings.removal,
+            "renderer": 2,
+            "regions": [
+                {
+                    k: r.model_dump()[k]
+                    for k in (
+                        "id",
+                        "target",
+                        "erase_rect",
+                        "layout_rect",
+                        "style",
+                        "fill_color",
+                        "fill_opacity",
+                        "mask_strokes",
+                    )
+                }
+                for r in page.regions
+            ],
+        }
+        return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
     def import_images(self, paths, settings=None, workspace_id=None, context=None):
         files = []
@@ -226,7 +244,7 @@ class MangaStore:
         path = self.directory(workspace_id) / (
             page.source
             if variant == "source"
-            else f"{page.id}.{document.revision}.{variant}.png"
+            else f"{page.id}.{self.preview_key(page, document.settings)}.{variant}.png"
         )
         if (
             path.resolve().parent != self.directory(workspace_id).resolve()
@@ -240,6 +258,7 @@ class MangaStore:
     def import_project(self, path, context=None):
         """Read only named originals; never extract arbitrary archive members."""
         import zipfile
+
         from Backend.domain.models.manga import identifier
 
         directory = None
