@@ -97,7 +97,8 @@ class ProjectAnalysisCacheTest(unittest.TestCase):
 
         replace = os.replace
         def fail_main(source, target):
-            if Path(target) == self.base:
+            # Windows runners may expand the TEMP directory's short path alias.
+            if Path(target).resolve() == self.base.resolve():
                 raise OSError("simulated migration interruption")
             replace(source, target)
 
