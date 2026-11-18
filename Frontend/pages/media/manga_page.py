@@ -166,6 +166,90 @@ class EditCommand(QUndoCommand):
         self.page.apply_edit(self.page.document)
 
 
+class ApiConfigDialog(QDialog):
+    """配置云 OCR 服务的 API Key / 网关地址 / 模型名。"""
+
+    def __init__(self, page, model):
+        super().__init__(page)
+        self.page = page
+        self.model = model
+        self.provider = model.get("api_provider") or ""
+        self.setWindowTitle(f"配置 API · {model['name']}")
+        self.setObjectName("mangaApiConfigDialog")
+        self.resize(520, 260)
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                f"{model['advice']}\n\n填写后即可在项目设置里选择该 OCR。"
+                "API Key 只保存在本机用户目录。"
+            )
+        )
+        form = QFormLayout()
+        self.api_key = QLineEdit()
+        self.api_key.setEchoMode(QLineEdit.Password)
+        self.api_key.setPlaceholderText("sk-…")
+        self.base_url = QLineEdit()
+        self.base_url.setPlaceholderText("留空使用官方地址；也可填兼容网关")
+        self.model_name = QLineEdit()
+        self.model_name.setPlaceholderText("如 gpt-4o-mini / gemini-2.0-flash")
+        form.addRow("API Key", self.api_key)
+        form.addRow("接口地址", self.base_url)
+        form.addRow("模型名", self.model_name)
+        layout.addLayout(form)
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        clear = QPushButton("清除配置")
+        clear.clicked.connect(lambda: self.save({}))
+        save = PrimaryPushButton("保存")
+        save.clicked.connect(self.save_from_form)
+        buttons.addWidget(clear)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        self.load_current()
+
+    def load_current(self):
+        def loaded(data):
+            config = (data.get("configs") or {}).get(self.provider, {})
+            self.api_key.setText(config.get("api_key", ""))
+            self.base_url.setText(config.get("base_url", ""))
+            self.model_name.setText(config.get("model", ""))
+
+        self.page.background(
+            lambda: self.page.client.request("GET", "/model-apis"), loaded
+        )
+
+    def save_from_form(self):
+        self.save(
+            {
+                "api_key": self.api_key.text().strip(),
+                "base_url": self.base_url.text().strip(),
+                "model": self.model_name.text().strip(),
+            }
+        )
+
+    def save(self, payload):
+        body = {"provider": self.provider, **payload}
+
+        def request():
+            return self.page.client.request("POST", "/model-apis", json=body)
+
+        def done(result):
+            if "models" in result:
+                self.page.refresh_model_catalogue(result["models"])
+                self.status.setText("已保存" if payload else "已清除该服务配置")
+                if payload:
+                    self.accept()
+                else:
+                    self.reject()
+            else:
+                self.status.setText(str(result.get("error", "保存失败")))
+
+        self.page.background(request, done)
+
+
 class ModelDialog(QDialog):
     def __init__(self, page):
         super().__init__(page)
@@ -174,24 +258,31 @@ class ModelDialog(QDialog):
         qconfig.themeChanged.connect(self.apply_theme)
         self.page = page
         self.setWindowTitle("漫画模型中心")
-        self.resize(980, 480)
+        self.resize(1120, 620)
         layout = QVBoxLayout(self)
-        layout.addWidget(
-            QLabel(
-                "核心模型随安装包提供。扩展模型保留原权重版本；legacy 可从 ImageTrans 模型文件夹导入。"
-            )
+        self.intro = QLabel(
+            "检测模型与本地 OCR 按需下载；云 API OCR 选择后在「配置 API」填密钥。"
+            "悬停任意模型可查看功能说明。"
         )
+        self.intro.setWordWrap(True)
+        layout.addWidget(self.intro)
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
+        self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(
-            ["模型", "状态", "大小", "用途与建议", "来源许可"]
+            ["模型", "类型", "状态", "大小", "功能说明", "来源许可"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
+        self.table.setColumnWidth(0, 230)
+        self.table.setColumnWidth(1, 90)
+        self.table.setColumnWidth(2, 150)
+        self.table.setColumnWidth(3, 70)
+        self.table.setColumnWidth(4, 380)
+        layout.addWidget(self.table, 1)
         bar = QHBoxLayout()
         layout.addLayout(bar)
+        self.api_button = QPushButton("配置 API")
         for label, action in [
             ("下载", self.download),
             ("导入目录", self.import_model),
@@ -202,8 +293,46 @@ class ModelDialog(QDialog):
             button = QPushButton(label)
             button.clicked.connect(action)
             bar.addWidget(button)
+        self.api_button.clicked.connect(self.configure_api)
+        bar.addWidget(self.api_button)
         self.status = QLabel()
+        self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        self.refresh()
+
+    KIND_LABELS = {
+        "detect": "检测模型",
+        "ocr": "本地 OCR",
+        "package": "pip OCR",
+        "api": "云 API OCR",
+        "system": "系统 OCR",
+        "inpaint": "去字",
+    }
+
+    def row_state(self, model):
+        kind = model.get("kind", "local")
+        if not model.get("supported", True):
+            return "尚未适配", True
+        if kind == "api":
+            if not model.get("installed"):
+                return "未启用（点「配置 API」）", False
+            if not model.get("api_ready"):
+                return "⚠ 需要配置 API", True
+            return "已配置", False
+        if kind == "system":
+            return ("系统可用" if model.get("installed") else "系统不支持"), False
+        if kind == "package":
+            if model.get("installed"):
+                return "依赖已就绪", False
+            return "需安装 pip 包", True
+        return ("已安装" if model.get("installed") else "未安装"), False
+
+    def configure_api(self):
+        model = self.selected()
+        if not model or model.get("kind") != "api":
+            self.status.setText("请选择一个云 API OCR 模型后再配置")
+            return
+        ApiConfigDialog(self.page, model).exec()
         self.refresh()
 
     def apply_theme(self, *_):
@@ -215,25 +344,77 @@ class ModelDialog(QDialog):
             lambda: self.page.client.request("GET", "/models"), self.loaded
         )
 
+    ORDER = {"detect": 0, "ocr": 1, "package": 2, "api": 3, "system": 4, "inpaint": 5}
+
     def loaded(self, data):
-        self.models = data["models"]
-        self.table.setRowCount(len(self.models))
-        for row, model in enumerate(self.models):
-            for col, value in enumerate(
-                [
-                    model["name"],
-                    "已安装"
-                    if model["installed"]
-                    else "未安装"
-                    if model.get("supported", True)
-                    else "尚未适配",
-                    f"{model['size_mb']} MB",
-                    model["advice"],
-                    model["license"],
-                ]
-            ):
-                self.table.setItem(row, col, QTableWidgetItem(value))
+        models = list(data.get("models", []))
+        models.sort(
+            key=lambda m: (
+                self.ORDER.get(m.get("kind") if m.get("kind") != "local" else m.get("role", "local"), 9),
+                m.get("advanced", False),
+                m.get("name", ""),
+            )
+        )
+        self.models = models
+        self.table.setRowCount(len(models))
+        for row, model in enumerate(models):
+            kind = model.get("kind", "local")
+            label = (
+                self.KIND_LABELS.get(kind, kind)
+                if kind != "local"
+                else self.KIND_LABELS.get(model.get("role", ""), model.get("role", ""))
+            )
+            if model.get("advanced"):
+                label += " · 高级"
+            state, warn = self.row_state(model)
+            size = f"{model['size_mb']} MB" if model.get("size_mb") else "—"
+            values = [
+                model["name"],
+                label,
+                state,
+                size,
+                model["advice"],
+                model["license"],
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col == 2 and warn:
+                    item.setForeground(QColor("#e74856"))
+                tooltip = model["advice"]
+                if model.get("langs"):
+                    tooltip += "\n支持语言：" + ", ".join(model["langs"])
+                if model.get("source"):
+                    tooltip += "\n来源：" + model["source"]
+                if kind == "api" and not model.get("api_ready"):
+                    tooltip += "\n⚠ 已选择但尚未配置 API Key"
+                item.setToolTip(tooltip)
+                self.table.setItem(row, col, item)
+            # 标记未配置 API 的行：状态列红字已足够；再加浅色底提示
+            if kind == "api" and model.get("installed") and not model.get("api_ready"):
+                for col in range(self.table.columnCount()):
+                    cell = self.table.item(row, col)
+                    if cell is not None:
+                        cell.setBackground(QColor(231, 72, 86, 24))
         self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(4, 380)
+        configured = sum(
+            1
+            for m in models
+            if m.get("kind") == "api" and m.get("api_ready")
+        )
+        pending = sum(
+            1
+            for m in models
+            if m.get("kind") == "api" and m.get("installed") and not m.get("api_ready")
+        )
+        if pending:
+            self.status.setText(
+                f"{pending} 个云 API OCR 已启用但未配置密钥，选中后点「配置 API」"
+            )
+        elif configured:
+            self.status.setText(f"已配置 {configured} 个云 API OCR")
+        else:
+            self.status.setText("")
 
     def selected(self):
         row = self.table.currentRow()
@@ -241,16 +422,32 @@ class ModelDialog(QDialog):
 
     def download(self):
         model = self.selected()
-        if model:
-            self.status.setText("下载中，可在主页面取消任务…")
-            self.page.start_request(
-                lambda: self.page.client.request(
-                    "POST",
-                    f"/models/{model['id']}/download",
-                    headers={"Prefer": "respond-async"},
-                ),
-                lambda r: self.refresh(),
+        if not model:
+            return
+        kind = model.get("kind", "local")
+        if kind == "api":
+            self.configure_api()
+            return
+        if kind == "package":
+            self.status.setText(
+                "该 OCR 随 pip 包提供：请先安装对应依赖（pip install），模型会在首次使用时自动下载"
             )
+            return
+        if kind == "system":
+            self.status.setText("系统 OCR 无需下载，直接在项目设置里选择即可")
+            return
+        if not model.get("supported", True) or not model.get("url"):
+            self.status.setText("该模型暂不支持一键下载，请从官方来源获取后使用「导入目录」")
+            return
+        self.status.setText(f"正在下载 {model['name']}（{model['size_mb']} MB），可在主页面取消…")
+        self.page.start_request(
+            lambda: self.page.client.request(
+                "POST",
+                f"/models/{model['id']}/download",
+                headers={"Prefer": "respond-async"},
+            ),
+            lambda r: self.refresh(),
+        )
 
     def import_model(self):
         model = self.selected()
@@ -512,6 +709,7 @@ class MangaPage(QWidget):
         QTimer.singleShot(0, self.refresh_history)
         QTimer.singleShot(0, self.refresh_providers)
         QTimer.singleShot(0, self.refresh_fonts)
+        QTimer.singleShot(0, self.refresh_model_catalogue)
 
     def apply_theme(self, *_):
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -571,13 +769,18 @@ class MangaPage(QWidget):
         self.scope.setCurrentIndex(1)
         self.scope.hide()
         self.detector = QComboBox()
-        self.detector.addItems(["manga-panel", "legacy-balloon-yolov4"])
+        for model_id in ("manga-panel", "legacy-balloon-yolov4"):
+            self.detector.addItem(model_id, model_id)
         self.ocr = QComboBox()
-        self.ocr.addItems(["mangaocr", "rapidocr"])
-        self.detector.currentTextChanged.connect(
-            lambda v: self.set_setting("detector", v)
+        for model_id in ("mangaocr", "rapidocr"):
+            self.ocr.addItem(model_id, model_id)
+        self.detector.currentIndexChanged.connect(
+            lambda: self.set_setting("detector", self.detector.currentData())
         )
-        self.ocr.currentTextChanged.connect(lambda v: self.set_setting("ocr", v))
+        self.ocr.currentIndexChanged.connect(
+            lambda: self.set_setting("ocr", self.ocr.currentData())
+        )
+        self.model_catalogue = []
         self.source_language = QComboBox()
         self.source_language.addItems(["ja", "zh", "en", "ko"])
         self.target_language = QComboBox()
@@ -851,7 +1054,10 @@ class MangaPage(QWidget):
             "更多",
             [
                 ("项目设置…", self.open_project_settings),
-                ("模型中心…", lambda: ModelDialog(self).exec()),
+                (
+                "模型中心…",
+                lambda: (ModelDialog(self).exec(), self.refresh_model_catalogue()),
+            ),
                 ("导出原文 JSON…", lambda: self.export_translation(True)),
                 ("导入译文 JSON…", self.import_translation),
             ],
@@ -1881,6 +2087,46 @@ class MangaPage(QWidget):
 
         self.background(lambda: self.client.request("GET", "/fonts"), loaded_fonts)
 
+    def refresh_model_catalogue(self, models=None):
+        """缓存模型目录；供模型中心与项目设置的下拉共用。"""
+        if models is None:
+            def loaded(data):
+                self.model_catalogue = data.get("models", [])
+
+            self.background(lambda: self.client.request("GET", "/models"), loaded)
+            return
+        self.model_catalogue = models
+        self.fill_model_choices()
+
+    def fill_model_choices(self):
+        catalogue = getattr(self, "model_catalogue", None) or []
+        for combo, role, current in (
+            (getattr(self, "detector", None), "detect", self.detector.currentText()),
+            (getattr(self, "ocr", None), "ocr", self.ocr.currentText()),
+        ):
+            if combo is None:
+                continue
+            entries = [
+                m
+                for m in catalogue
+                if m.get("role") == role
+                and m.get("installed")
+                and (
+                    m.get("kind", "local") in {"local", "system"}
+                    or (m.get("kind") == "api" and m.get("api_ready"))
+                    or m.get("kind") == "package"
+                )
+            ]
+            if not entries:
+                continue
+            combo.blockSignals(True)
+            combo.clear()
+            for m in entries:
+                combo.addItem(m["name"], m["id"])
+            index = combo.findData(current)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.blockSignals(False)
+
     def sync_project_summary(self):
         if not hasattr(self, "project_summary_button"):
             return
@@ -1895,6 +2141,7 @@ class MangaPage(QWidget):
         )
 
     def open_project_settings(self):
+        self.fill_model_choices()
         if self.project_dialog is None:
             dialog = QDialog(self)
             dialog.setWindowTitle("项目设置")
@@ -2000,6 +2247,7 @@ class MangaPage(QWidget):
         self.page_id = document["pages"][0]["id"] if document["pages"] else None
         self.refresh_pages()
         self.populate_settings()
+        self.fill_model_choices()
         self.select_region(None)
         self.load_image()
         self.refresh_punctuation()
@@ -2033,8 +2281,15 @@ class MangaPage(QWidget):
         self.loading_form = True
         s = self.document["settings"]
         self.precise.setChecked(s.get("removal") == "precise")
-        self.detector.setCurrentText(s["detector"])
-        self.ocr.setCurrentText(s["ocr"])
+        for combo, value in (
+            (self.detector, s["detector"]),
+            (self.ocr, s["ocr"]),
+        ):
+            index = combo.findData(value)
+            if index < 0 and value:
+                combo.addItem(value, value)
+                index = combo.findData(value)
+            combo.setCurrentIndex(max(0, index))
         self.panels.setChecked(s["detect_panels"])
         self.source_language.setCurrentText(s["source_language"])
         self.target_language.setCurrentText(s["target_language"])

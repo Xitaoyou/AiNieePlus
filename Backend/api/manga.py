@@ -66,6 +66,13 @@ class ModelImport(RequestModel):
     path: str = Field(min_length=1)
 
 
+class ModelApiConfig(RequestModel):
+    provider: str = Field(min_length=1, max_length=64)
+    api_key: str = Field(default="", max_length=4096)
+    base_url: str = Field(default="", max_length=2048)
+    model: str = Field(default="", max_length=200)
+
+
 def create_manga_router(runtime, authorized, service=None):
     router = APIRouter(
         prefix="/api/v2/manga", tags=["Manga"], dependencies=[Depends(authorized)]
@@ -123,6 +130,18 @@ def create_manga_router(runtime, authorized, service=None):
             lane="image",
             prefer=prefer,
         )
+
+    @router.get("/model-apis")
+    def model_apis():
+        return {"configs": service.models.api_configs()}
+
+    @router.post("/model-apis")
+    def save_model_api(body: ModelApiConfig):
+        catalogue = service.models.save_api_config(
+            body.provider,
+            body.model_dump(exclude={"provider"}),
+        )
+        return {"models": catalogue}
 
     @router.post("/models/{model_id}/verify")
     def verify_model(model_id: str):

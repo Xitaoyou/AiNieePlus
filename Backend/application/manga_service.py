@@ -316,7 +316,37 @@ class MangaService:
                             region.order = order
                         page.regions = regions
                     elif operation == "ocr":
-                        folder = self.models.folder(document.settings.ocr)
+                        spec = self.models.spec(document.settings.ocr)
+                        kind = spec.get("kind", "local")
+                        backend = spec.get("backend")
+                        folder = ""
+                        api_config = {}
+                        if kind == "local":
+                            folder = str(self.models.folder(document.settings.ocr))
+                        elif kind == "package":
+                            if not self.models.package_available(backend):
+                                raise PipelineError(
+                                    "MODEL_DEPENDENCY_MISSING",
+                                    f"请先安装 {backend} 依赖包后再使用该 OCR",
+                                    409,
+                                )
+                        elif kind == "api":
+                            api_config = self.models.api_config(
+                                spec.get("api_provider")
+                            )
+                            if not api_config:
+                                raise PipelineError(
+                                    "MODEL_API_NOT_CONFIGURED",
+                                    "该 OCR 模型需要配置 API：请在模型中心点「配置 API」填写密钥",
+                                    409,
+                                )
+                        elif kind == "system":
+                            if not spec.get("supported", False):
+                                raise PipelineError(
+                                    "MODEL_UNSUPPORTED",
+                                    "当前系统不支持该系统 OCR 引擎",
+                                    409,
+                                )
                         for region in selected:
                             self.cancelled(context)
                             if region.source_locked or (
@@ -329,8 +359,10 @@ class MangaService:
                                 context,
                                 operation="ocr",
                                 image_path=str(source),
-                                folder=str(folder),
+                                folder=folder,
                                 model_id=document.settings.ocr,
+                                backend=backend,
+                                api_config=api_config,
                                 rect=[r.x, r.y, r.width, r.height],
                             )
                             with self.store.lock:

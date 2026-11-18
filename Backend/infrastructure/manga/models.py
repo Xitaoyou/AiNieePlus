@@ -1,5 +1,6 @@
 """Versioned public model catalogue and verified, non-executable asset imports."""
 
+import sys
 from pathlib import Path
 import hashlib
 import json
@@ -11,79 +12,649 @@ from Backend.application.pipeline_common import PipelineError
 from Backend.application.manga_store import atomic_json
 
 
+_SYSTEM_OCR_AVAILABLE = sys.platform == "win32"
+
 CATALOGUE = [
+    # ================= 检测模型（balloon-dataset，ONNX + model.json）=================
     dict(
         id="manga-panel",
         name="Manga panel YOLO26",
         role="detect",
+        kind="local",
+        backend="yolo26",
         core=True,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja", "zh", "ko", "en"],
         files=["model.onnx", "model.json"],
         license="AGPL-3.0",
         size_mb=10,
         url="https://github.com/xulihang/balloon-dataset/releases/download/models/manga-panel.zip",
         source="https://github.com/xulihang/balloon-dataset",
-        advice="轻量日漫文字定位；分镜类别与文字类别分别处理",
+        advice="轻量日漫文字定位；分镜类别与文字类别分别处理。内置随包提供",
     ),
     dict(
-        id="legacy-balloon-yolov4",
-        name="Legacy 气泡 YOLOv4",
+        id="ppocr-manga-det",
+        name="PP-OCRv6 漫画行检测",
         role="detect",
+        kind="local",
+        backend="rapidocr_det",
         core=False,
-        files=["model.weights", "model.cfg", "model.json"],
-        license="需核对原权重来源",
-        size_mb=282,
-        url="",
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja"],
+        files=["model.onnx", "model.json"],
+        license="Apache-2.0",
+        size_mb=2,
+        url="https://github.com/xulihang/balloon-dataset/releases/download/models/PPOCRv6-manga-det.zip",
         source="https://github.com/xulihang/balloon-dataset",
-        advice="与旧版参数一致；从现有 ImageTrans 导入，不随公开主包分发",
+        advice="最轻量的日文行检测；按 PP-OCR det 分割推理，适合快速分框与试跑",
     ),
     dict(
-        id="mangaocr",
-        name="mangaOCR ONNX",
-        role="ocr",
-        core=True,
-        files=["encoder.onnx", "decoder.onnx", "vocab.txt"],
-        license="Apache-2.0",
-        size_mb=120,
-        url="https://github.com/xulihang/mangaocr-onnx/releases/download/models/",
-        source="https://github.com/xulihang/mangaocr-onnx",
-        advice="日语漫画单框识字，横排竖排均可；不负责定位",
+        id="japanese-lines",
+        name="Japanese lines 行检测",
+        role="detect",
+        kind="local",
+        backend="yolo_generic",
+        core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja"],
+        files=["model.onnx", "model.json"],
+        license="见原仓库",
+        size_mb=11,
+        url="https://github.com/xulihang/balloon-dataset/releases/download/models/japanese-lines.zip",
+        source="https://github.com/xulihang/balloon-dataset",
+        advice="日文竖排行级检测（ImageTrans 内置同款），适合行分组与竖排漫画",
     ),
     dict(
-        id="rapidocr",
-        name="RapidOCR PP-OCR",
-        role="ocr",
-        core=True,
-        files=["det.onnx", "rec.onnx", "cls.onnx"],
-        license="Apache-2.0",
-        size_mb=20,
-        url="",
-        source="https://github.com/RapidAI/RapidOCR",
-        advice="通用检测与中英文识别；可导入其他语种识别权重",
+        id="japanese-manga",
+        name="Japanese manga 气泡检测",
+        role="detect",
+        kind="local",
+        backend="yolo_generic",
+        core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja"],
+        files=["model.onnx", "model.json"],
+        license="见原仓库",
+        size_mb=33,
+        url="https://github.com/xulihang/balloon-dataset/releases/download/models/japanese-manga.zip",
+        source="https://github.com/xulihang/balloon-dataset",
+        advice="日漫气泡定位主力模型；框更贴合气泡边缘，减少误检背景文字",
     ),
     dict(
-        id="lama",
-        name="LaMa Manga ONNX",
-        role="inpaint",
-        core=True,
-        files=["model.onnx"],
-        license="Apache-2.0",
-        size_mb=208,
-        url="https://huggingface.co/mayocream/lama-manga-onnx/resolve/main/lama-manga.onnx",
-        source="https://huggingface.co/mayocream/lama-manga-onnx",
-        advice="复杂背景精准去字；需有效的文字像素蒙版",
+        id="chinese-webtoon",
+        name="Chinese webtoon 条漫检测",
+        role="detect",
+        kind="local",
+        backend="yolo_generic",
+        core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["zh"],
+        files=["model.onnx", "model.json"],
+        license="见原仓库",
+        size_mb=11,
+        url="https://github.com/xulihang/balloon-dataset/releases/download/models/chinese_webtoon.zip",
+        source="https://github.com/xulihang/balloon-dataset",
+        advice="国漫条漫（长条竖版）文字气泡检测",
+    ),
+    dict(
+        id="korean-webtoon",
+        name="Korean webtoon 条漫检测",
+        role="detect",
+        kind="local",
+        backend="yolo_generic",
+        core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["ko"],
+        files=["model.onnx", "model.json"],
+        license="见原仓库",
+        size_mb=11,
+        url="https://github.com/xulihang/balloon-dataset/releases/download/models/korean_webtoon.zip",
+        source="https://github.com/xulihang/balloon-dataset",
+        advice="韩漫条漫文字气泡检测",
+    ),
+    dict(
+        id="comic-speech-bubble",
+        name="Comic speech bubble 气泡检测",
+        role="detect",
+        kind="local",
+        backend="yolo_generic",
+        core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["en"],
+        files=["model.onnx", "model.json"],
+        license="见原仓库",
+        size_mb=85,
+        url="https://github.com/xulihang/balloon-dataset/releases/download/models/comic-speech-bubble.zip",
+        source="https://github.com/xulihang/balloon-dataset",
+        advice="欧美漫画对话气泡检测（英文漫画优先）",
     ),
     dict(
         id="manga-with-layout",
         name="Koharu RFDETR 版面分割",
         role="detect",
+        kind="local",
+        backend="layout",
         core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja", "zh", "ko", "en"],
         files=["model.onnx", "model.json"],
-        license="见原模型说明",
-        size_mb=85,
+        license="见原仓库",
+        size_mb=78,
+        url="https://github.com/xulihang/balloon-dataset/releases/download/models/manga-with-layout.zip",
+        source="https://github.com/xulihang/balloon-dataset",
+        advice="版面/分镜结构分析，供阅读顺序组织；推理适配尚未启用",
+        supported=False,
+    ),
+    dict(
+        id="japanese-manga-old",
+        name="Japanese manga（旧版权重）",
+        role="detect",
+        kind="local",
+        backend="yolo_generic",
+        core=False,
+        advanced=True,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja"],
+        files=["model.onnx", "model.json"],
+        license="见原仓库",
+        size_mb=214,
+        url="https://github.com/xulihang/balloon-dataset/releases/download/models/japanese-manga-old.zip",
+        source="https://github.com/xulihang/balloon-dataset",
+        advice="旧版日漫检测权重（214MB），仅在对比历史结果时使用；高级/可选",
+    ),
+    dict(
+        id="manga-with-layout-768",
+        name="Koharu 版面分割（768px）",
+        role="detect",
+        kind="local",
+        backend="layout",
+        core=False,
+        advanced=True,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja", "zh", "ko", "en"],
+        files=["model.onnx", "model.json"],
+        license="见原仓库",
+        size_mb=66,
+        url="https://github.com/xulihang/balloon-dataset/releases/download/models/manga-with-layout-768px.zip",
+        source="https://github.com/xulihang/balloon-dataset",
+        advice="小尺寸版面分割权重；高级/可选，推理适配尚未启用",
+        supported=False,
+    ),
+    dict(
+        id="rfdetr",
+        name="RF-DETR 检测",
+        role="detect",
+        kind="local",
+        backend="rfdetr",
+        core=False,
+        advanced=True,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja", "zh", "ko", "en"],
+        files=["model.onnx", "model.json"],
+        license="见原仓库",
+        size_mb=106,
+        url="https://github.com/xulihang/balloon-dataset/releases/download/models/rfdetr.zip",
+        source="https://github.com/xulihang/balloon-dataset",
+        advice="RF-DETR 检测权重；高级/可选，推理适配尚未启用",
+        supported=False,
+    ),
+    dict(
+        id="legacy-balloon-yolov4",
+        name="Legacy 气泡 YOLOv4",
+        role="detect",
+        kind="local",
+        backend="yolov4",
+        core=False,
+        advanced=True,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja"],
+        files=["model.weights", "model.cfg", "model.json"],
+        license="需核对原权重来源",
+        size_mb=282,
         url="",
         source="https://github.com/xulihang/balloon-dataset",
-        advice="扩展模型，仅提供来源；暂不支持此模型的推理适配",
+        advice="与旧版参数一致；请从现有 ImageTrans 模型文件夹导入",
+    ),
+    # ================= 本地 OCR（pip 模型 / ONNX 权重）=================
+    dict(
+        id="mangaocr",
+        name="mangaOCR ONNX",
+        role="ocr",
+        kind="local",
+        backend="mangaocr",
+        core=True,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja"],
+        files=["encoder.onnx", "decoder.onnx", "vocab.txt"],
+        license="Apache-2.0",
+        size_mb=120,
+        url="https://github.com/xulihang/mangaocr-onnx/releases/download/models/",
+        source="https://github.com/xulihang/mangaocr-onnx",
+        advice="日语漫画单框识字，横排竖排均可；不负责定位。内置随包提供",
+    ),
+    dict(
+        id="rapidocr",
+        name="RapidOCR PP-OCR",
+        role="ocr",
+        kind="local",
+        backend="rapidocr",
+        core=True,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["zh", "ja", "ko", "en"],
+        files=["det.onnx", "rec.onnx", "cls.onnx"],
+        license="Apache-2.0",
+        size_mb=20,
+        url="",
+        source="https://github.com/RapidAI/RapidOCR",
+        advice="通用检测与中英日韩识别；内置随包提供，可导入其他语种识别权重",
+    ),
+    dict(
+        id="paddleocr",
+        name="PaddleOCR PP-OCRv5",
+        role="ocr",
+        kind="package",
+        backend="paddle",
+        core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["zh", "ja", "ko", "en"],
+        files=[],
+        license="Apache-2.0",
+        size_mb=50,
+        url="",
+        source="https://github.com/PaddlePaddle/PaddleOCR",
+        advice="PaddleOCR 全语言识别；首次使用时由 pip 包自动下载模型（需安装 paddleocr 与 paddlepaddle）",
+        supported=True,
+    ),
+    dict(
+        id="easyocr",
+        name="EasyOCR",
+        role="ocr",
+        kind="package",
+        backend="easyocr",
+        core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["zh", "ja", "ko", "en"],
+        files=[],
+        license="Apache-2.0",
+        size_mb=100,
+        url="",
+        source="https://github.com/JaidedAI/EasyOCR",
+        advice="80+ 语言通用 OCR；首次使用时自动下载所选语言模型（需安装 easyocr）",
+    ),
+    dict(
+        id="doctr",
+        name="DocTR（拉丁语系）",
+        role="ocr",
+        kind="package",
+        backend="doctr",
+        core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["en"],
+        files=[],
+        license="Apache-2.0",
+        size_mb=50,
+        url="",
+        source="https://github.com/mindee/doctr",
+        advice="拉丁语系文字识别；首次使用时自动下载权重（需安装 python-doctr）",
+    ),
+    # ================= 云 API OCR（需要配置 API）=================
+    dict(
+        id="api-openai",
+        name="ChatGPT OCR（OpenAI 兼容）",
+        role="ocr",
+        kind="api",
+        backend="api_openai",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="openai",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://platform.openai.com/docs",
+        advice="用视觉大模型识字，跨语言准确；也可填任意 OpenAI 兼容网关地址",
+    ),
+    dict(
+        id="api-gemini",
+        name="Gemini OCR",
+        role="ocr",
+        kind="api",
+        backend="api_gemini",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="gemini",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://ai.google.dev/gemini-api/docs",
+        advice="Google Gemini 视觉识字；适合多语言混排与手写体",
+    ),
+    dict(
+        id="api-glm",
+        name="GLM-4V OCR",
+        role="ocr",
+        kind="api",
+        backend="api_openai",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="glm",
+        langs=["zh", "ja", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://open.bigmodel.cn",
+        advice="智谱 GLM 视觉模型；使用 OpenAI 兼容接口",
+    ),
+    dict(
+        id="api-deepseek",
+        name="DeepSeek OCR",
+        role="ocr",
+        kind="api",
+        backend="api_openai",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="deepseek",
+        langs=["zh", "ja", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://platform.deepseek.com",
+        advice="DeepSeek 兼容接口识字；需确认所用模型支持图片输入",
+    ),
+    dict(
+        id="api-baidu",
+        name="百度 OCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="baidu",
+        langs=["zh", "ja", "ko", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://cloud.baidu.com/product/ocr",
+        advice="百度通用文字识别；需 API Key/Secret，签名协议由兼容网关接入",
+    ),
+    dict(
+        id="api-tencent",
+        name="腾讯 OCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="tencent",
+        langs=["zh", "ja", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://cloud.tencent.com/product/ocr",
+        advice="腾讯云文字识别；需 SecretId/SecretKey，签名协议由兼容网关接入",
+    ),
+    dict(
+        id="api-sogou",
+        name="搜狗 OCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="sogou",
+        langs=["zh", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://ai.sogou.com",
+        advice="搜狗 OCR；需服务商凭证，签名协议由兼容网关接入",
+    ),
+    dict(
+        id="api-clova",
+        name="Naver CLOVA OCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="clova",
+        langs=["ko", "ja", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://www.ncloud.com/product/aiService/ocr",
+        advice="韩文漫画首选；需 Invoke URL 与 Secret Key",
+    ),
+    dict(
+        id="api-abbyy",
+        name="ABBYY Cloud OCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="abbyy",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://www.abbyy.com/cloud-ocr-sdk",
+        advice="企业级多语言 OCR；需 Application ID 与密码",
+    ),
+    dict(
+        id="api-google",
+        name="Google Cloud Vision OCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="google",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://cloud.google.com/vision/docs/ocr",
+        advice="Google Vision 文字识别；需服务账号密钥",
+    ),
+    dict(
+        id="api-googledrive",
+        name="Google Drive OCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="googledrive",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://developers.google.com/drive",
+        advice="借 Drive 文档转换做 OCR；需 OAuth 访问令牌",
+    ),
+    dict(
+        id="api-kandianguji",
+        name="Kandian Guji 古籍 OCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=True,
+        requires_api=True,
+        api_provider="kandianguji",
+        langs=["zh"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://www.kandianguji.com",
+        advice="竖排古籍/繁体识别；高级/可选",
+    ),
+    dict(
+        id="api-dynamsoft",
+        name="Dynamsoft OCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=True,
+        requires_api=True,
+        api_provider="dynamsoft",
+        langs=["zh", "ja", "ko", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://www.dynamsoft.com",
+        advice="商业 OCR SDK；高级/可选",
+    ),
+    dict(
+        id="api-mineru",
+        name="MinerU OCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=True,
+        requires_api=True,
+        api_provider="mineru",
+        langs=["zh", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://github.com/opendatalab/MinerU",
+        advice="文档解析型 OCR；高级/可选",
+    ),
+    dict(
+        id="api-panda",
+        name="PandaOCR",
+        role="ocr",
+        kind="api",
+        backend="api_custom",
+        core=False,
+        advanced=True,
+        requires_api=True,
+        api_provider="panda",
+        langs=["zh", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://github.com/RapidAI/PandaOCR",
+        advice="聚合型 OCR 前端；高级/可选，需自建服务端",
+    ),
+    # ================= 系统 OCR（Windows 原生）=================
+    dict(
+        id="winrtocr",
+        name="Windows 系统 OCR（WinRT）",
+        role="ocr",
+        kind="system",
+        backend="winrt",
+        core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="跟随 Windows 语言包",
+        size_mb=0,
+        url="",
+        source="https://learn.microsoft.com/uwp/api/windows.media.ocr",
+        advice="调用 Windows.Media.Ocr，需在系统设置安装对应语言包；无需下载模型",
+        supported=_SYSTEM_OCR_AVAILABLE,
+    ),
+    dict(
+        id="oneocr",
+        name="OneNote OCR（oneOCR）",
+        role="ocr",
+        kind="system",
+        backend="oneocr",
+        core=False,
+        advanced=True,
+        requires_api=False,
+        api_provider=None,
+        langs=["zh", "ja", "ko", "en"],
+        files=[],
+        license="跟随 Windows/Office",
+        size_mb=0,
+        url="",
+        source="https://github.com/ImageTrans",
+        advice="调用 OneNote 组件识字；高级/可选，需本机装有 OneNote 引擎",
         supported=False,
+    ),
+    # ================= 修复 / Inpainting =================
+    dict(
+        id="lama",
+        name="LaMa Manga ONNX",
+        role="inpaint",
+        kind="local",
+        backend="lama",
+        core=True,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=[],
+        files=["model.onnx"],
+        license="Apache-2.0",
+        size_mb=208,
+        url="https://huggingface.co/mayocream/lama-manga-onnx/resolve/main/lama-manga.onnx",
+        source="https://huggingface.co/mayocream/lama-manga-onnx",
+        advice="复杂背景精准去字；需有效的文字像素蒙版。内置随包提供",
     ),
 ]
 
@@ -113,15 +684,77 @@ class ModelRegistry:
             "MANGA_MODEL_MISSING", f"请在模型中心安装或导入 {model_id}", 409
         )
 
+    # ---- 云 API OCR 配置（独立于工程数据，存用户目录）----
+    def api_config_path(self):
+        return self.root.parent / "manga-ocr-apis.json"
+
+    def api_configs(self):
+        path = self.api_config_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_api_config(self, provider, config):
+        apis = self.api_configs()
+        cleaned = {
+            k: v
+            for k, v in (config or {}).items()
+            if isinstance(v, str) and v.strip()
+        }
+        if cleaned:
+            apis[provider] = cleaned
+        else:
+            apis.pop(provider, None)
+        path = self.api_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json(path, apis)
+        return self.catalogue()
+
+    def api_config(self, provider):
+        return self.api_configs().get(provider or "", {})
+
+    @staticmethod
+    def package_available(backend):
+        import importlib.util
+
+        module = {"paddle": "paddleocr", "easyocr": "easyocr", "doctr": "doctr"}.get(
+            backend
+        )
+        if not module:
+            return False
+        try:
+            return importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            return False
+
     def catalogue(self):
+        apis = self.api_configs()
         result = []
         for spec in CATALOGUE:
             row = dict(spec)
-            try:
-                row["path"] = str(self.folder(spec["id"]))
-                row["installed"] = True
-            except PipelineError:
-                row["installed"] = False
+            kind = spec.get("kind", "local")
+            row.setdefault("advanced", False)
+            row.setdefault("requires_api", False)
+            row["api_ready"] = True
+            row["path"] = ""
+            if kind == "api":
+                config = apis.get(spec.get("api_provider"), {})
+                row["installed"] = bool(config)
+                row["api_ready"] = bool(
+                    config.get("api_key") or config.get("base_url")
+                )
+            elif kind == "system":
+                row["installed"] = bool(spec.get("supported", False))
+            elif kind == "package":
+                row["installed"] = self.package_available(spec.get("backend"))
+            else:
+                try:
+                    row["path"] = str(self.folder(spec["id"]))
+                    row["installed"] = True
+                except PipelineError:
+                    row["installed"] = False
             result.append(row)
         return result
 
@@ -189,19 +822,22 @@ class ModelRegistry:
             return
         from Backend.infrastructure.manga.engines import session
 
+        spec = self.spec(model_id)
+        backend = spec.get("backend", "")
         names = {
             i.name
-            for i in session(str(folder / self.spec(model_id)["files"][0])).get_inputs()
+            for i in session(str(folder / spec["files"][0])).get_inputs()
         }
         valid = (
-            (model_id == "manga-panel" and names == {"images"})
-            or (model_id == "mangaocr" and names == {"pixel_values"})
-            or (model_id == "rapidocr" and names == {"x"})
+            (backend in {"yolo26", "yolo_generic"} and "images" in names)
+            or (backend == "mangaocr" and names == {"pixel_values"})
+            or (backend in {"rapidocr", "rapidocr_det"} and "x" in names)
             or (
-                model_id == "lama"
+                backend == "lama"
                 and len(names) == 2
                 and any("mask" in n.lower() for n in names)
             )
+            or backend in {"layout", "rfdetr", "yolov4"}
         )
         if not valid:
             raise PipelineError(
@@ -210,6 +846,23 @@ class ModelRegistry:
 
     def download(self, model_id, context=None):
         spec = self.spec(model_id)
+        kind = spec.get("kind", "local")
+        if kind == "api":
+            raise PipelineError(
+                "MODEL_API_ONLY",
+                "云 API 模型无需下载；请在模型中心点「配置 API」填写密钥",
+                409,
+            )
+        if kind == "system":
+            raise PipelineError(
+                "MODEL_SYSTEM_OCR", "系统 OCR 无需下载，直接在项目设置中选择使用", 409
+            )
+        if kind == "package":
+            raise PipelineError(
+                "MODEL_PACKAGE_REQUIRED",
+                "该模型随 pip 包提供：请先安装对应依赖，模型会在首次使用时自动下载",
+                409,
+            )
         if not spec["url"] or not spec.get("supported", True):
             raise PipelineError(
                 "MODEL_IMPORT_REQUIRED", "此模型请从官方来源下载后使用目录导入", 409
@@ -262,21 +915,35 @@ class ModelRegistry:
                                 )
                 shutil.copyfile(partial, output)
 
-            if model_id == "manga-panel":
-                archive = temp / "model.zip"
-                fetch(spec["url"], archive)
-                with zipfile.ZipFile(archive) as z:
-                    for name in spec["files"]:
-                        if z.getinfo(name).file_size > 1024**3:
-                            raise PipelineError(
-                                "MODEL_TOO_LARGE", "模型文件超过 1GB 限制", 422
-                            )
-                        (temp / name).write_bytes(z.read(name))
+            if len(spec["files"]) == 1 and spec["files"][0] == "model.onnx":
+                # 单权重模型（如 LaMa）：直接下载
+                fetch(spec["url"], temp / "model.onnx")
             elif model_id == "mangaocr":
                 for name in spec["files"]:
                     fetch(spec["url"] + name, temp / name)
             else:
-                fetch(spec["url"], temp / "model.onnx")
+                # 检测模型 zip 包：按文件名匹配（包内可能带子目录）
+                archive = temp / "model.zip"
+                fetch(spec["url"], archive)
+                with zipfile.ZipFile(archive) as z:
+                    members = {
+                        Path(n).name: n
+                        for n in z.namelist()
+                        if not n.endswith("/")
+                    }
+                    for name in spec["files"]:
+                        member = members.get(name)
+                        if member is None:
+                            raise PipelineError(
+                                "MODEL_VERSION_CHANGED",
+                                f"下载包缺少 {name}，请检查官方更新",
+                                409,
+                            )
+                        if z.getinfo(member).file_size > 1024**3:
+                            raise PipelineError(
+                                "MODEL_TOO_LARGE", "模型文件超过 1GB 限制", 422
+                            )
+                        (temp / name).write_bytes(z.read(member))
             from Backend.core.paths import backend_resource_path
 
             lock_path = backend_resource_path("manga", "source-lock.json")
