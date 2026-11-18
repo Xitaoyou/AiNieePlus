@@ -14,7 +14,8 @@ from PIL import Image, ImageOps
 from Backend.application.pipeline_common import PipelineError
 from Backend.domain.models.manga import MangaPage, MangaSettings, MangaWorkspace
 
-EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".pdf"}
+EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".pdf", ".cbz"}
+ARCHIVE_EXTENSIONS = {".cbz", ".zip"}
 
 
 def atomic_json(path, data):
@@ -271,6 +272,48 @@ class MangaStore:
                                 "RGB", (pixmap.width, pixmap.height), pixmap.samples
                             )
                             append_image(image, f"{path.stem}-{index + 1:04d}.png")
+                elif path.suffix.lower() in ARCHIVE_EXTENSIONS:
+                    import zipfile
+
+                    with zipfile.ZipFile(path) as archive:
+                        members = sorted(
+                            (
+                                m
+                                for m in archive.infolist()
+                                if not m.is_dir()
+                                and Path(m.filename).suffix.lower()
+                                in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+                            ),
+                            key=lambda m: [
+                                int(x) if x.isdigit() else x.lower()
+                                for x in re.split(r"(\d+)", m.filename)
+                            ],
+                        )
+                        if not members:
+                            raise PipelineError(
+                                "INVALID_MANGA_INPUT",
+                                f"压缩包里没有图片：{path.name}",
+                                422,
+                            )
+                        if len(members) + len(document.pages) > 2000:
+                            raise PipelineError(
+                                "INVALID_MANGA_INPUT", "漫画工程最多支持 2000 页", 422
+                            )
+                        for member in members:
+                            if context and context.is_cancelled():
+                                raise PipelineError("CANCELLED", "CBZ 导入已取消", 409)
+                            if member.file_size > 300 * 1024 * 1024:
+                                raise PipelineError(
+                                    "IMAGE_TOO_LARGE", "压缩包内单页过大", 422
+                                )
+                            from io import BytesIO
+
+                            with Image.open(
+                                BytesIO(archive.read(member))
+                            ) as image:
+                                append_image(
+                                    image, f"{path.stem}-{Path(member.filename).name}"
+                                )
                 else:
                     with Image.open(path) as image:
                         append_image(image, path.name)
@@ -331,6 +374,60 @@ class MangaStore:
             )
         return path
 
+    def prune_assets(self, workspace_id, keep=6):
+        """删掉过期的预览/去字缓存。
+
+        每改一次字号就会写出一整套 {page}.{key}.{variant}.png，旧文件
+        永远不会被访问却一直占盘（一个 73 页工程几轮编辑就是几个 GB）。
+        按 page id 分组，每组保留最近 keep 个不同 key。
+        """
+        directory = self.directory(workspace_id)
+        if not directory.is_dir():
+            return 0
+        document = self.load(workspace_id)
+        live = set()
+        for page in document.pages:
+            live.add(page.source)
+            for variant in ("clean", "mask"):
+                live.add(
+                    f"{page.id}.{self.background_key(page, document.settings)}.{variant}.png"
+                )
+            for variant in ("render", "clean", "mask", "layer"):
+                live.add(
+                    f"{page.id}.{self.preview_key(page, document.settings)}.{variant}.png"
+                )
+        groups = {}
+        for path in directory.glob("*.png"):
+            if path.name in live:
+                continue
+            # {page_id}.{key}.{variant}.png 或 {page_id}.{key}.{variant}-cache.png
+            parts = path.name.split(".")
+            if len(parts) < 4 or len(parts[0]) != 32:
+                continue
+            groups.setdefault(parts[0], []).append(path)
+        removed = 0
+        for paths in groups.values():
+            paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            live_keys = {
+                name.split(".")[1]
+                for name in live
+                if name.startswith(paths[0].name.split(".")[0] + ".")
+            }
+            dropped = 0
+            for path in paths:
+                key = path.name.split(".")[1]
+                if key in live_keys:
+                    continue
+                dropped += 1
+                if dropped <= keep:
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
+
     def import_project(self, path, context=None):
         """Read only named originals; never extract arbitrary archive members."""
         import zipfile
@@ -355,11 +452,21 @@ class MangaStore:
                     member = archive.getinfo(page.source)
                     if member.file_size > 300 * 1024 * 1024:
                         raise ValueError("原图过大")
-                    data = archive.read(member)
-                    if hashlib.sha256(data).hexdigest() != page.sha256:
-                        raise ValueError("原图校验失败")
                     destination = directory / page.source
-                    destination.write_bytes(data)
+                    digest = hashlib.sha256()
+                    # 300MB 的单页读进内存会让导入 20 页的工程直接 OOM；
+                    # 边读边算哈希，落盘后只回读做尺寸校验。
+                    with archive.open(member) as incoming, destination.open(
+                        "wb"
+                    ) as outgoing:
+                        while True:
+                            chunk = incoming.read(1 << 20)
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+                            outgoing.write(chunk)
+                    if digest.hexdigest() != page.sha256:
+                        raise ValueError("原图校验失败")
                     with Image.open(destination) as image:
                         if (
                             image.size != (page.width, page.height)

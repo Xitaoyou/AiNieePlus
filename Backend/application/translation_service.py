@@ -218,7 +218,10 @@ def translate_model(model, config=None, context=None) -> dict:
 
     def abort_operation(error):
         from Backend.core.log_system import redact
-        operation_errors.append({"code": "OPERATION_FAILED", "stage": stage, "message": redact(str(error))})
+        # 用户主动取消时，回调/取结果抛出的异常是取消的连带产物，
+        # 记成 OPERATION_FAILED 会把「已取消」误判成「接口失败」。
+        if not context.is_cancelled():
+            operation_errors.append({"code": "OPERATION_FAILED", "stage": stage, "message": redact(str(error))})
         context.cancel()
 
     def consume_result(future, items, file_path, *, notify=True):
@@ -343,6 +346,9 @@ def translate_model(model, config=None, context=None) -> dict:
     if operation_errors:
         status = "partial" if successful or preserved else "failed"
     elif user_cancelled:
+        status = "cancelled"
+    elif context.is_cancelled():
+        # 取消过但一句都没成功：也算取消，不要报成失败
         status = "cancelled"
     else:
         status = "success" if not remaining else ("partial" if successful or preserved else "failed")

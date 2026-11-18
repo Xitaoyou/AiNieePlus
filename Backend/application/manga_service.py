@@ -17,6 +17,15 @@ from Backend.domain.models.manga import Rect, Region, identifier
 from Backend.infrastructure.manga.models import ModelRegistry
 
 
+def _png_bytes(image):
+    """PDF 内嵌图片要字节流；直接塞 PNG 比转 JPEG 快且无损。"""
+    from io import BytesIO
+
+    buffer = BytesIO()
+    image.save(buffer, "PNG", optimize=False, compress_level=6)
+    return buffer.getvalue()
+
+
 class StageCancellation:
     """An internal translation failure must not impersonate a user's cancel."""
 
@@ -214,12 +223,22 @@ class MangaService:
         if provider is None:
             return self.store.load(workspace_id)
         state = provider()
+        # recognize 会按页、按子阶段反复调用 run()，每页两次 store.load
+        # 只为确认标点表没变是纯浪费；用上次同步结果挡掉重复读盘。
+        fingerprint = (
+            workspace_id,
+            json.dumps(state.get("rows"), sort_keys=True, ensure_ascii=False),
+            bool(state.get("enabled")),
+        )
+        if getattr(self, "_punctuation_fingerprint", None) == fingerprint:
+            return None
         with self.store.lock:
             document = self.store.load(workspace_id)
             if (
                 document.settings.punctuation_rules == state["rows"]
                 and document.settings.punctuation_enabled == state["enabled"]
             ):
+                self._punctuation_fingerprint = fingerprint
                 return document
             revision = document.revision
             document.settings.punctuation_rules = state["rows"]
@@ -230,7 +249,9 @@ class MangaService:
                     page.default_style.auto_punctuation = state["enabled"]
                 for region in page.regions:
                     region.style.auto_punctuation = state["enabled"]
-            return self.store.save(document, revision)
+            result = self.store.save(document, revision)
+            self._punctuation_fingerprint = fingerprint
+            return result
 
     def run(
         self,
@@ -754,6 +775,16 @@ class MangaService:
         provider_id = options.get("provider_id") or document.settings.provider_id
         if provider_id:
             config["provider_id"] = provider_id
+        # 角色设定与跨框上下文：漫画的台词经常只写「他」「那家伙」，
+        # 不把角色表和相邻框原文送进提示词，人称与语气就会每框一跳。
+        settings = document.settings
+        if settings.characterization_switch and settings.characters:
+            config["characterization_switch"] = True
+            config["characterization_data"] = [
+                character.to_row() for character in settings.characters
+            ]
+        if settings.context_neighbors:
+            config["pre_line_counts"] = settings.context_neighbors
         from dataclasses import replace
 
         original = {r.id: r.model_copy(deep=True) for r in selected}
@@ -763,7 +794,11 @@ class MangaService:
             from Backend.core.protocol import to_wire
 
             items = [to_wire(item) for item in items]
-            self.cancelled(context)
+            # 取消时不要再抛 CANCELLED：这个回调由翻译层在汇总循环里调用，
+            # 抛出去会被当成「接口异常」记进 operation_errors，
+            # 用户主动取消最后反而看到「翻译未完成，请检查接口日志」。
+            if context.is_cancelled():
+                return
             with self.store.lock:
                 current = self.store.load(document.id)
                 live = {r.id: r for p in current.pages for r in p.regions}
@@ -918,6 +953,11 @@ class MangaService:
             region.warnings = [
                 item.get("message", "") for item in by_region.get(region.id, [])
             ]
+        # 每次渲染都会写出一整套带哈希的中间图；不清的话工程目录只涨不降。
+        try:
+            self.store.prune_assets(document.id)
+        except (OSError, ValueError):
+            pass
 
     def export(self, workspace_id, output_dir, mode="png", context=None):
         import shutil
@@ -927,8 +967,10 @@ class MangaService:
         output = Path(output_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
         published = []
+        quality = []
         with tempfile.TemporaryDirectory(prefix=".manga-export-", dir=output) as stage:
             result = self._export_into(workspace_id, stage, mode, context)
+            quality = result.get("quality") or []
             sources = [Path(p) for p in result["files"]]
             if any((output / p.name).exists() for p in sources):
                 raise PipelineError(
@@ -946,10 +988,10 @@ class MangaService:
                 for path in published:
                     path.unlink(missing_ok=True)
                 raise
-        return {"files": [str(p) for p in published]}
+        return {"files": [str(p) for p in published], "quality": quality}
 
     def _export_into(self, workspace_id, output_dir, mode="png", context=None):
-        document = self.sync_punctuation(workspace_id)
+        document = self.sync_punctuation(workspace_id) or self.store.load(workspace_id)
         output = Path(output_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
         if mode in {"i18next", "i18next-source", "i18next-target"}:
@@ -977,7 +1019,7 @@ class MangaService:
                         self.store.asset(workspace_id, page.id, "source"), page.source
                     )
             return {"files": [str(target)]}
-        if mode not in {"png", "jpeg", "zip"}:
+        if mode not in {"png", "jpeg", "zip", "cbz", "pdf"}:
             raise PipelineError("INVALID_EXPORT", "未知导出格式", 422)
         files = []
         quality = []
@@ -1011,6 +1053,37 @@ class MangaService:
             with zipfile.ZipFile(target, "x", zipfile.ZIP_DEFLATED) as archive:
                 for path in files:
                     archive.write(path, path.name)
+            files = [target]
+        elif mode == "cbz":
+            # CBZ 就是「按文件名排序的图片压缩包」，阅读器按名字排页，
+            # 所以必须沿用 0001-xxx.png 这个零填充序号，不能只塞原名。
+            target = output / f"{document.id}.cbz"
+            with zipfile.ZipFile(target, "x", zipfile.ZIP_STORED) as archive:
+                for path in files:
+                    archive.write(path, path.name)
+            for path in files:
+                path.unlink(missing_ok=True)
+            files = [target]
+        elif mode == "pdf":
+            target = output / f"{document.id}.pdf"
+            if target.exists():
+                raise PipelineError(
+                    "OUTPUT_EXISTS", "导出文件已存在，请使用新目录", 409
+                )
+            import fitz
+
+            with fitz.open() as pdf:
+                for path in files:
+                    with Image.open(path) as image:
+                        rgb = image.convert("RGB")
+                        width, height = rgb.width, rgb.height
+                        page_ = pdf.new_page(width=width, height=height)
+                        page_.insert_image(
+                            page_.rect,
+                            stream=_png_bytes(rgb),
+                        )
+                    path.unlink(missing_ok=True)
+                pdf.save(str(target), deflate=True)
             files = [target]
         return {"files": [str(p) for p in files], "quality": quality}
 
@@ -1064,6 +1137,69 @@ class MangaService:
                 "workspace": document.model_dump(),
                 "fixed": fixed,
                 "count": len(fixed),
+            }
+
+    def replace_text(
+        self,
+        workspace_id,
+        pattern,
+        replacement="",
+        ignore_case=False,
+        field="target",
+        page_ids=None,
+        dry_run=False,
+    ):
+        """批量正则替换。dry_run 只回报命中数与前几条样例，不动工程。"""
+        import re
+
+        flags = re.IGNORECASE if ignore_case else 0
+        try:
+            regex = re.compile(pattern, flags)
+        except re.error as error:
+            raise PipelineError(
+                "INVALID_MANGA_PATTERN", f"正则表达式无效：{error}", 422
+            ) from error
+        with self.store.lock:
+            document = self.store.load(workspace_id)
+            revision = document.revision
+            samples = []
+            changed = 0
+            for page in document.pages:
+                if page_ids and page.id not in page_ids:
+                    continue
+                for region in page.regions:
+                    before = getattr(region, field)
+                    if not before:
+                        continue
+                    after = regex.sub(replacement, before)
+                    if after == before:
+                        continue
+                    changed += 1
+                    if len(samples) < 20:
+                        samples.append(
+                            {
+                                "page_id": page.id,
+                                "page": page.name,
+                                "region_id": region.id,
+                                "before": before,
+                                "after": after,
+                            }
+                        )
+                    if not dry_run:
+                        setattr(region, field, after)
+                        if field == "source":
+                            region.translation_state, region.translation_error = (
+                                "idle",
+                                "",
+                            )
+            workspace = document
+            if changed and not dry_run:
+                workspace = self.store.save(document, revision)
+            return {
+                "workspace": workspace.model_dump(),
+                "changed": changed,
+                "samples": samples,
+                "dry_run": dry_run,
             }
 
     def import_translation(self, workspace_id, path):

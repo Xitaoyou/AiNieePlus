@@ -219,6 +219,9 @@ def render_page(source, page, models):
     return {"clean": clean, "mask": mask, "layer": layer, "render": composite}, warnings
 
 
+RENDERER_VERSION = 5
+
+
 def materialize(
     page,
     source_path,
@@ -247,6 +250,9 @@ def materialize(
         json.dumps(
             {
                 "sha": page.sha256,
+                # 去字算法（LaMa/填充/描边）或排版规则改动后，旧缓存是错的；
+                # 不带版本号时图片会停在上一版效果上，怎么改都「没生效」。
+                "renderer": RENDERER_VERSION,
                 "regions": [
                     {
                         k: r.model_dump()[k]

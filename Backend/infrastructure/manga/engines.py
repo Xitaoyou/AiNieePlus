@@ -9,7 +9,7 @@ from PIL import Image
 from Backend.application.pipeline_common import PipelineError
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=8)
 def session(path):
     import onnxruntime as ort
 
@@ -50,6 +50,10 @@ def _ppocr_det(image, folder, confidence):
     height, width = rgb.shape[:2]
     scale = min(size_w / width, size_h / height)
     w, h = max(1, round(width * scale)), max(1, round(height * scale))
+    # PP-OCR 的 det 预处理是「左上角对齐 + 0 填充」，和外层 yolo 分支的
+    # 居中 letterbox 不同。坐标还原必须和填充方式一致：这里 mask 会先
+    # resize 回 (w, h) 再取轮廓，等于已经裁掉了右侧/底部填充，所以后面
+    # 直接 /scale 是对的，不要再减 left/top。
     canvas = np.zeros((size_h, size_w, 3), dtype=np.uint8)
     canvas[:h, :w] = cv2.resize(rgb, (w, h))
     tensor = (
@@ -846,7 +850,7 @@ def _ocr_mit48px(image, folder, config):
             409,
         )
     try:
-        session_ = ort.InferenceSession(str(model_path))
+        session_ = _cached_engine(f"mit48px:{model_path}", lambda: ort.InferenceSession(str(model_path)))
     except Exception as error:
         raise PipelineError(
             "MODEL_UNSUPPORTED",
@@ -1093,12 +1097,15 @@ def recognize(
     if backend == "rapidocr" or engine_id == "rapidocr":
         from rapidocr import RapidOCR
 
-        engine = RapidOCR(
-            params={
-                "Det.model_path": str(folder / "det.onnx"),
-                "Rec.model_path": str(folder / "rec.onnx"),
-                "Cls.model_path": str(folder / "cls.onnx"),
-            }
+        engine = _cached_engine(
+            f"rapidocr:{folder}",
+            lambda: RapidOCR(
+                params={
+                    "Det.model_path": str(folder / "det.onnx"),
+                    "Rec.model_path": str(folder / "rec.onnx"),
+                    "Cls.model_path": str(folder / "cls.onnx"),
+                }
+            ),
         )
         result = engine(np.asarray(image.convert("RGB")))
         return "\n".join(result.txts or [])

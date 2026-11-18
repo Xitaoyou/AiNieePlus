@@ -65,8 +65,27 @@ class MangaRun(RequestModel):
 class MangaExport(RequestModel):
     output_dir: str = Field(min_length=1)
     mode: Literal[
-        "png", "jpeg", "zip", "project", "i18next", "i18next-source", "i18next-target"
+        "png",
+        "jpeg",
+        "zip",
+        "cbz",
+        "pdf",
+        "project",
+        "i18next",
+        "i18next-source",
+        "i18next-target",
     ] = "png"
+
+
+class MangaReplace(RequestModel):
+    """批量正则替换：只改译文，先 dry_run 预览命中数与样例。"""
+
+    pattern: str = Field(min_length=1, max_length=500)
+    replacement: str = Field(default="", max_length=2000)
+    ignore_case: bool = Field(default=False, strict=True)
+    field: Literal["target", "source"] = "target"
+    page_ids: list[str] | None = Field(default=None, max_length=2000)
+    dry_run: bool = Field(default=False, strict=True)
 
 
 class ModelImport(RequestModel):
@@ -289,6 +308,18 @@ def create_manga_router(runtime, authorized, service=None):
     def fix_overflow(workspace_id: str, body: MangaFixOverflow):
         return service.fix_overflow(
             workspace_id, page_ids=body.page_ids, region_ids=body.region_ids
+        )
+
+    @router.post("/{workspace_id}/replace")
+    def replace(workspace_id: str, body: MangaReplace):
+        return service.replace_text(
+            workspace_id,
+            pattern=body.pattern,
+            replacement=body.replacement,
+            ignore_case=body.ignore_case,
+            field=body.field,
+            page_ids=body.page_ids,
+            dry_run=body.dry_run,
         )
 
     @router.post("/{workspace_id}/export")

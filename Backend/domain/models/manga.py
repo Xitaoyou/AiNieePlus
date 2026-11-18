@@ -57,6 +57,39 @@ class LetterStyle(MangaModel):
         return value
 
 
+class StylePreset(MangaModel):
+    """可复用的排版预设：一处保存、整部套用。"""
+
+    id: str = Field(default_factory=identifier, pattern=r"^[a-f0-9]{32}$")
+    name: str = Field(min_length=1, max_length=40)
+    style: LetterStyle = Field(default_factory=LetterStyle)
+
+
+class CharacterProfile(MangaModel):
+    """漫画专用角色设定：字段与原版「角色介绍」表一致，可直接透传给翻译层。"""
+
+    id: str = Field(default_factory=identifier, pattern=r"^[a-f0-9]{32}$")
+    original_name: str = Field(default="", max_length=200)
+    translated_name: str = Field(default="", max_length=200)
+    gender: str = Field(default="", max_length=40)
+    age: str = Field(default="", max_length=40)
+    personality: str = Field(default="", max_length=500)
+    speech_style: str = Field(default="", max_length=500)
+    additional_info: str = Field(default="", max_length=1000)
+
+    def to_row(self):
+        """转成 CharacterHelper.normalize_row 认识的原始行。"""
+        return {
+            "original_name": self.original_name,
+            "translated_name": self.translated_name,
+            "gender": self.gender,
+            "age": self.age,
+            "personality": self.personality,
+            "speech_style": self.speech_style,
+            "additional_info": self.additional_info,
+        }
+
+
 class Stroke(MangaModel):
     points: list[tuple[float, float]] = Field(min_length=1, max_length=10000)
     radius: int = Field(default=8, ge=1, le=256)
@@ -145,6 +178,11 @@ class MangaSettings(MangaModel):
     default_style: LetterStyle = Field(default_factory=LetterStyle)
     punctuation_rules: list[dict] | None = Field(default=None, max_length=2000)
     punctuation_enabled: bool = False
+    style_presets: list[StylePreset] = Field(default_factory=list, max_length=50)
+    characters: list[CharacterProfile] = Field(default_factory=list, max_length=500)
+    # 跨框上下文：把相邻框的原文一起送进提示词，改善人称与语气连贯。
+    context_neighbors: int = Field(default=1, ge=0, le=5)
+    characterization_switch: bool = True
 
 
 class MangaWorkspace(MangaModel):

@@ -27,10 +27,12 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QColorDialog,
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGraphicsView,
     QHBoxLayout,
     QHeaderView,
@@ -118,6 +120,8 @@ def form_update(method):
             return method(self, *args, **kwargs)
         finally:
             self.loading_form = previous
+            if not previous:
+                self.flush_pending_edits()
 
     return guarded
 
@@ -386,8 +390,14 @@ class ModelDialog(QDialog):
         qconfig.themeChanged.connect(self.apply_theme)
         self.page = page
         self.setWindowTitle("漫画模型中心")
-        self.resize(1180, 700)
-        self.setMinimumSize(980, 560)
+        # 按屏幕可用区收缩：1366×768 的笔记本上 1180×700 会顶出任务栏，
+        # 高度取可用高度减 80 留出标题栏与边距。
+        available = QApplication.primaryScreen().availableGeometry()
+        self.resize(
+            min(1180, max(880, available.width() - 120)),
+            min(700, max(480, available.height() - 80)),
+        )
+        self.setMinimumSize(880, 480)
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         self.intro = QLabel(
@@ -810,6 +820,9 @@ class PunctuationRulesDialog(QDialog):
         self.table.setHorizontalHeaderLabels(["替换前", "替换后", "正则"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.table.setColumnWidth(2, 64)
+        self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.table)
         buttons = QHBoxLayout()
@@ -907,6 +920,433 @@ class PunctuationRulesDialog(QDialog):
         self.page.background(request, saved)
 
 
+def compose_compare(source_bytes, render_bytes):
+    """把原图与成品并排拼成一张对比图；成品缺失时退回原图。"""
+    if not render_bytes:
+        return source_bytes
+    from io import BytesIO
+
+    from PIL import Image
+
+    left = Image.open(BytesIO(source_bytes)).convert("RGB")
+    right = Image.open(BytesIO(render_bytes)).convert("RGB")
+    if right.size != left.size:
+        right = right.resize(left.size, Image.LANCZOS)
+    gap = max(4, left.width // 200)
+    canvas = Image.new("RGB", (left.width * 2 + gap, left.height), (24, 26, 30))
+    canvas.paste(left, (0, 0))
+    canvas.paste(right, (left.width + gap, 0))
+    buffer = BytesIO()
+    canvas.save(buffer, "PNG", compress_level=3)
+    return buffer.getvalue()
+
+
+class ReplaceDialog(QDialog):
+    """批量正则查找替换：先预览命中，再一次性写回工程（可撤销）。"""
+
+    def __init__(self, page):
+        super().__init__(page)
+        self.page = page
+        self.setWindowTitle("批量查找替换")
+        self.setObjectName("mangaReplaceDialog")
+        self.resize(720, 520)
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "按正则表达式批量改写译文或原文。先用「预览」确认命中，再执行替换；"
+            "替换结果会作为一次编辑进入撤销栈。"
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        form = QFormLayout()
+        self.pattern = QLineEdit()
+        self.pattern.setPlaceholderText(r"例如：\s+ 或 ^…$")
+        self.replacement = QLineEdit()
+        self.replacement.setPlaceholderText("留空表示删除命中内容")
+        self.field = QComboBox()
+        self.field.addItem("译文", "target")
+        self.field.addItem("原文（OCR）", "source")
+        self.scope = QComboBox()
+        self.scope.addItem("当前页", "page")
+        self.scope.addItem("整部漫画", "all")
+        self.scope.currentIndexChanged.connect(self.refresh_scope)
+        self.ignore_case = QCheckBox("忽略大小写")
+        form.addRow("查找（正则）", self.pattern)
+        form.addRow("替换为", self.replacement)
+        form.addRow("作用字段", self.field)
+        form.addRow("范围", self.scope)
+        form.addRow(self.ignore_case)
+        layout.addLayout(form)
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["页", "替换前", "替换后"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.table.setColumnWidth(0, 150)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setWordWrap(False)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, 1)
+        self.status = QLabel("输入表达式后点击「预览」")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        page.button(buttons, "预览", self.preview)
+        apply_button = PrimaryPushButton("全部替换")
+        apply_button.clicked.connect(self.apply)
+        buttons.addWidget(apply_button)
+        close = QPushButton("关闭")
+        close.clicked.connect(self.reject)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        self.refresh_scope()
+
+    def refresh_scope(self):
+        if self.scope.currentData() == "page":
+            self.scope.setToolTip("仅替换当前页的文字框")
+        else:
+            self.scope.setToolTip("替换整部漫画的文字框")
+
+    def payload(self, dry_run):
+        page_ids = (
+            [self.page.page_id]
+            if self.scope.currentData() == "page" and self.page.page_id
+            else None
+        )
+        return {
+            "pattern": self.pattern.text(),
+            "replacement": self.replacement.text(),
+            "ignore_case": self.ignore_case.isChecked(),
+            "field": self.field.currentData(),
+            "page_ids": page_ids,
+            "dry_run": dry_run,
+        }
+
+    def send(self, dry_run, callback):
+        payload = self.payload(dry_run)
+        if not payload["pattern"]:
+            self.status.setText("请先填写查找表达式")
+            return
+        document = self.page.document
+        if not document:
+            return
+        self.status.setText("正在预览…" if dry_run else "正在替换…")
+        endpoint = f"/{document['id']}/replace"
+
+        def request():
+            try:
+                return self.page.client.request("POST", endpoint, json=payload)
+            except Exception as error:
+                return {"error": str(error)}
+
+        self.page.background(request, callback)
+
+    def preview(self):
+        self.send(True, self.preview_done)
+
+    def preview_done(self, result):
+        if sip.isdeleted(self):
+            return
+        if "error" in result:
+            self.status.setText("预览失败：" + result["error"])
+            return
+        samples = result.get("samples") or []
+        self.table.setRowCount(len(samples))
+        for row, sample in enumerate(samples):
+            self.table.setItem(row, 0, QTableWidgetItem(str(sample.get("page", ""))))
+            self.table.setItem(row, 1, QTableWidgetItem(sample.get("before", "")))
+            self.table.setItem(row, 2, QTableWidgetItem(sample.get("after", "")))
+        changed = result.get("changed", 0)
+        self.status.setText(
+            f"共命中 {changed} 个文字框"
+            + (f"，下表显示前 {len(samples)} 条" if changed > len(samples) else "")
+            + ("。确认无误后点击「全部替换」。" if changed else "。")
+        )
+
+    def apply(self):
+        if not self.page.document:
+            return
+
+        def ready():
+            self.send(False, self.applied)
+
+        self.page.save(ready)
+
+    def applied(self, result):
+        if sip.isdeleted(self):
+            return
+        if "error" in result:
+            self.status.setText("替换失败：" + result["error"])
+            return
+        workspace = result.get("workspace") or {}
+        changed = result.get("changed", 0)
+        if not changed or not workspace.get("pages"):
+            self.status.setText("没有命中需要替换的内容")
+            return
+        pages = deepcopy(workspace["pages"])
+        self.page.edit(
+            "批量替换" + ("译文" if self.field.currentData() == "target" else "原文"),
+            lambda: self.page.document.__setitem__("pages", pages),
+        )
+        self.page.refresh_pages()
+        self.page.draw_canvas()
+        self.status.setText(f"已替换 {changed} 个文字框，可用 Ctrl+Z 撤销")
+
+
+class CharactersDialog(QDialog):
+    """角色设定：把人物名、性格与语气透传给翻译，让对白口吻保持一致。"""
+
+    COLUMNS = ["原名", "译名", "性别", "年龄", "性格", "语气 / 措辞", "补充说明"]
+
+    def __init__(self, page):
+        super().__init__(page)
+        self.page = page
+        self.setWindowTitle("角色设定与跨框上下文")
+        self.setObjectName("mangaCharactersDialog")
+        self.resize(860, 520)
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "这些设定会随工程保存，翻译时作为「角色设定」一并提交，"
+            "让同一人物在不同文字框里的语气保持一致。原名要与原文用字一致才会命中。"
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        header = self.table.horizontalHeader()
+        for column, mode in (
+            (0, QHeaderView.Stretch),
+            (1, QHeaderView.Stretch),
+            (2, QHeaderView.Fixed),
+            (3, QHeaderView.Fixed),
+            (4, QHeaderView.Stretch),
+            (5, QHeaderView.Stretch),
+            (6, QHeaderView.Stretch),
+        ):
+            header.setSectionResizeMode(column, mode)
+        self.table.setColumnWidth(2, 70)
+        self.table.setColumnWidth(3, 70)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, 1)
+        options = QHBoxLayout()
+        self.enabled = QCheckBox("翻译时带上角色设定")
+        self.enabled.setToolTip("关闭后只按逐框文本翻译，不提交人物表")
+        options.addWidget(self.enabled)
+        options.addSpacing(12)
+        options.addWidget(QLabel("跨框上下文"))
+        self.neighbors = QSpinBox()
+        self.neighbors.setRange(0, 5)
+        self.neighbors.setToolTip(
+            "每个文字框额外带上前后各 N 个框的原文，帮助模型理解对话的承接关系；0 表示不带"
+        )
+        self.neighbors.setFixedWidth(90)
+        options.addWidget(self.neighbors)
+        options.addWidget(QLabel("框"))
+        options.addStretch(1)
+        page.button(options, "添加一行", self.add_row)
+        page.button(options, "删除选中行", self.remove_rows)
+        layout.addLayout(options)
+        buttons = QHBoxLayout()
+        self.status = QLabel("")
+        buttons.addWidget(self.status, 1)
+        page.button(buttons, "取消", self.reject)
+        save = PrimaryPushButton("保存设定")
+        save.clicked.connect(self.save)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        self.load()
+        for column in range(len(self.COLUMNS)):
+            self.table.resizeColumnToContents(column)
+            self.table.setColumnWidth(column, min(max(self.table.columnWidth(column), 70), 260))
+
+    def load(self):
+        settings = (self.page.document or {}).get("settings", {})
+        self.enabled.setChecked(bool(settings.get("characterization_switch", True)))
+        self.neighbors.setValue(int(settings.get("context_neighbors", 1) or 0))
+        self.table.setRowCount(0)
+        for character in settings.get("characters", []):
+            self.add_row(character)
+
+    def add_row(self, character=None):
+        character = character or {}
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        for column, key in enumerate(
+            (
+                "original_name",
+                "translated_name",
+                "gender",
+                "age",
+                "personality",
+                "speech_style",
+                "additional_info",
+            )
+        ):
+            self.table.setItem(row, column, QTableWidgetItem(str(character.get(key, ""))))
+
+    def remove_rows(self):
+        rows = sorted(
+            {index.row() for index in self.table.selectionModel().selectedRows()},
+            reverse=True,
+        )
+        for row in rows:
+            self.table.removeRow(row)
+
+    def rows(self):
+        values = []
+        for row in range(self.table.rowCount()):
+            record = {}
+            for column, key in enumerate(
+                (
+                    "original_name",
+                    "translated_name",
+                    "gender",
+                    "age",
+                    "personality",
+                    "speech_style",
+                    "additional_info",
+                )
+            ):
+                item = self.table.item(row, column)
+                record[key] = (item.text() if item else "").strip()
+            if record["original_name"]:
+                values.append(record)
+        return values
+
+    def save(self):
+        page = self.page
+        if not page.document:
+            return
+        records = self.rows()
+        switch = self.enabled.isChecked()
+        neighbors = self.neighbors.value()
+
+        def action():
+            settings = page.document["settings"]
+            existing = {c.get("original_name"): c for c in settings.get("characters", [])}
+            settings["characters"] = [
+                {
+                    "id": existing.get(record["original_name"], {}).get("id")
+                    or uuid4().hex,
+                    **record,
+                }
+                for record in records
+            ]
+            settings["characterization_switch"] = switch
+            settings["context_neighbors"] = neighbors
+
+        page.edit("更新角色设定", action)
+        self.status.setText(f"已保存 {len(records)} 个角色设定")
+        self.accept()
+
+
+class StylePresetsDialog(QDialog):
+    """样式预设：把常用字体排法存起来，一键套到本页或整部。"""
+
+    def __init__(self, page):
+        super().__init__(page)
+        self.page = page
+        self.setWindowTitle("样式预设")
+        self.setObjectName("mangaStylePresetsDialog")
+        self.resize(560, 460)
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "预设只保存字体、字号、颜色与对齐等排版参数，不含文字内容。"
+            "套用后会覆盖目标文字框的样式，可用 Ctrl+Z 撤销。"
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["预设名称", "说明"])
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 160)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.table, 1)
+        buttons = QHBoxLayout()
+        self.status = QLabel("")
+        buttons.addWidget(self.status, 1)
+        page.button(buttons, "删除选中", self.remove_current)
+        page.button(buttons, "应用到本页", lambda: self.apply(False))
+        page.button(buttons, "应用到整部", lambda: self.apply(True))
+        page.button(buttons, "关闭", self.reject)
+        layout.addLayout(buttons)
+        self.load()
+
+    def load(self):
+        presets = (self.page.document or {}).get("settings", {}).get("style_presets") or []
+        self.table.setRowCount(0)
+        for preset in presets:
+            style = preset.get("style") or {}
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            name = QTableWidgetItem(str(preset.get("name", "")))
+            name.setData(Qt.UserRole, preset.get("id"))
+            self.table.setItem(row, 0, name)
+            detail = (
+                f"{style.get('size', '')} px · "
+                f"{'竖排' if style.get('vertical') else '横排'} · "
+                f"{'粗体' if style.get('bold') else '常规'} · "
+                f"{style.get('font') or '默认字体'}"
+            )
+            self.table.setItem(row, 1, QTableWidgetItem(detail))
+        if presets:
+            self.table.selectRow(0)
+        self.status.setText(f"共 {len(presets)} 个预设")
+
+    def current(self):
+        rows = [index.row() for index in self.table.selectionModel().selectedRows()]
+        if not rows:
+            return None
+        presets = (self.page.document or {}).get("settings", {}).get("style_presets") or []
+        row = rows[0]
+        name_item = self.table.item(row, 0)
+        wanted = name_item.data(Qt.UserRole) if name_item else None
+        return next((p for p in presets if p.get("id") == wanted), None)
+
+    def remove_current(self):
+        preset = self.current()
+        if not preset:
+            self.status.setText("请先选中一个预设")
+            return
+        identifier = preset.get("id")
+
+        def action():
+            settings = self.page.document["settings"]
+            settings["style_presets"] = [
+                p for p in settings.get("style_presets") or [] if p.get("id") != identifier
+            ]
+
+        self.page.edit("删除样式预设", action)
+        self.load()
+
+    def apply(self, all_pages):
+        preset = self.current()
+        if not preset:
+            self.status.setText("请先选中一个预设")
+            return
+        style = deepcopy(preset.get("style") or {})
+
+        def action():
+            settings = self.page.document["settings"]
+            settings["default_style"] = deepcopy(style)
+            for page in self.page.document["pages"] if all_pages else [self.page.page()]:
+                page["default_style"] = deepcopy(style)
+                for region in page["regions"]:
+                    region["style"] = deepcopy(style)
+
+        label = "整部" if all_pages else "当前页"
+        self.page.edit(f"套用样式预设到{label}", action)
+        self.status.setText(f"已套用到{label}「{preset.get('name', '')}」")
+        self.page.draw_canvas()
+
+
 IMAGE_FILTER = (
     "图片与 PDF (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.pdf);;所有文件 (*)"
 )
@@ -987,6 +1427,10 @@ class MangaPage(QWidget):
         self.job_id = None
         self.job_manual_paths = set()
         self.loading_form = False
+        self.pending_edits = []
+        self._canvas_cache_key = None
+        self._canvas_cache_data = None
+        self._punctuation_loaded = False
         self.preview_pending = False
         self.session = 0
         self.follow_progress = True
@@ -1131,6 +1575,7 @@ class MangaPage(QWidget):
         for title, value in [
             ("实时编辑", "edit"),
             ("预览成品", "render"),
+            ("前后对比", "compare"),
             ("查看原图", "source"),
         ]:
             self.variant.addItem(title, value)
@@ -1331,6 +1776,7 @@ class MangaPage(QWidget):
             "翻译",
             [
                 ("翻译当前页", lambda: self.run("translate", scope=0)),
+                ("角色设定与跨框上下文…", self.open_characters),
                 (
                     "术语表（公共）",
                     lambda: self.open_public_table("prompt_dictionary_page"),
@@ -1351,6 +1797,7 @@ class MangaPage(QWidget):
             [
                 ("撤销", self.undo.undo),
                 ("重做", self.undo.redo),
+                ("批量查找替换…", self.open_replace),
                 ("清除译文…", lambda: self.clear_content("target")),
                 ("清除 OCR 原文…", lambda: self.clear_content("source")),
                 ("删除文字框…", lambda: self.clear_content("regions")),
@@ -1361,6 +1808,8 @@ class MangaPage(QWidget):
             "排版",
             [
                 ("设为新框默认", self.set_default_style),
+                ("保存当前样式为预设…", self.save_style_preset),
+                ("样式预设…", self.open_style_presets),
                 ("应用到本页已有框", lambda: self.apply_style(False)),
                 ("应用到整部已有框", lambda: self.apply_style(True)),
                 ("添加字体文件…", self.pick_font),
@@ -1502,6 +1951,7 @@ class MangaPage(QWidget):
                     "删除选中文字框 (Delete)",
                     self.delete_regions,
                 )
+        self.tool_divider = self.divider(tools)
         self.geometry = QComboBox()
         for title, key in [
             ("译文排版框", "layout_rect"),
@@ -1525,6 +1975,7 @@ class MangaPage(QWidget):
         self.geometry_done.hide()
         self.geometry_done.clicked.connect(self.exit_geometry_mode)
         tools.addWidget(self.geometry_done)
+        self.precise_divider = self.divider(tools)
         tools.addWidget(self.precise)
         self.brush = QSpinBox()
         self.brush.setRange(1, 256)
@@ -1557,13 +2008,13 @@ class MangaPage(QWidget):
         # 画布右下角统一：视图切换 + 适应窗口 + 缩放
         self.zoom_overlay = SimpleCardWidget(self.canvas.viewport())
         zoom_row = QHBoxLayout(self.zoom_overlay)
-        zoom_row.setContentsMargins(6, 4, 6, 4)
-        zoom_row.setSpacing(6)
+        zoom_row.setContentsMargins(8, 4, 8, 4)
+        zoom_row.setSpacing(4)
         zoom_row.addWidget(self.variant)
         self.icon_button(zoom_row, FluentIcon.FIT_PAGE, "适应窗口", self.fit_canvas)
         self.zoom_slider = QSlider(Qt.Horizontal)
         self.zoom_slider.setRange(self.ZOOM_MIN, self.ZOOM_MAX)
-        self.zoom_slider.setFixedWidth(88)
+        self.zoom_slider.setFixedWidth(72)
         self.zoom_slider.setValue(100)
         self.zoom_label = QLabel("100%")
         self.zoom_slider.valueChanged.connect(self.set_zoom)
@@ -1596,6 +2047,7 @@ class MangaPage(QWidget):
         form.setVerticalSpacing(9)
         # ==== 文字 ====
         text_header = QHBoxLayout()
+        text_header.setContentsMargins(0, 8, 0, 2)
         text_header.addWidget(StrongBodyLabel("文字", right_card))
         text_header.addStretch(1)
         form.addRow(text_header)
@@ -1607,6 +2059,7 @@ class MangaPage(QWidget):
             form.addRow(label, field)
         # ==== 排版 ====
         typography_header = QHBoxLayout()
+        typography_header.setContentsMargins(0, 12, 0, 2)
         typography_header.addWidget(StrongBodyLabel("排版", right_card))
         typography_header.addStretch(1)
         form.addRow(typography_header)
@@ -1953,7 +2406,10 @@ class MangaPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if hasattr(self, "document"):
+        # 只在第一次显示时同步标点表：原来每次 showEvent 都跑一遍，
+        # 会把用户刚改的标点规则重新拉回来并压一条撤销记录、把工程标脏。
+        if hasattr(self, "document") and not getattr(self, "_punctuation_loaded", False):
+            self._punctuation_loaded = True
             self.refresh_punctuation()
 
     def open_public_table(self, name):
@@ -2212,8 +2668,10 @@ class MangaPage(QWidget):
             return
         if self.variant.currentData() == "render":
             self.run("render", scope=0)
-        else:
-            self.load_image()
+            return
+        if self.variant.currentData() == "compare":
+            self.status.setText("前后对比：左侧原图，右侧成品；成品尚未生成时显示原图")
+        self.load_image()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2301,6 +2759,18 @@ class MangaPage(QWidget):
         button.task_menu = menu
         layout.addWidget(button)
         return button
+
+    def divider(self, layout, height=18):
+        """工具条分组用的竖线：比 QFrame(VLine) 更细、颜色跟随主题。"""
+        line = QFrame()
+        line.setFrameShape(QFrame.VLine)
+        line.setFrameShadow(QFrame.Plain)
+        line.setFixedWidth(1)
+        line.setFixedHeight(height)
+        tone = "rgba(255,255,255,0.14)" if isDarkTheme() else "rgba(0,0,0,0.12)"
+        line.setStyleSheet(f"QFrame {{background:{tone};border:none;}}")
+        layout.addWidget(line)
+        return line
 
     def icon_button(self, layout, icon, label, action):
         button = TransparentToolButton(icon, self)
@@ -2925,6 +3395,18 @@ class MangaPage(QWidget):
         )
 
     def refresh_pages(self):
+        # 重建列表会清空左栏多选：先记下选中的页，重建后按 id 还原，
+        # 否则「Shift 选中若干页 → 删除/导出」在任意刷新后失效。
+        keep = {
+            self.document["pages"][row]["id"]
+            for row in (
+                index.row() for index in self.pages.selectionModel().selectedRows()
+            )
+            if 0 <= row < len(self.document["pages"])
+        }
+        current = self.pages.currentRow()
+        if 0 <= current < len(self.document["pages"]):
+            keep.add(self.document["pages"][current]["id"])
         self.pages.blockSignals(True)
         self.pages.clear()
         for i, page in enumerate(self.document["pages"]):
@@ -2941,7 +3423,17 @@ class MangaPage(QWidget):
             self.document["pages"][index]["id"] if self.document["pages"] else None
         )
         self.pages.setCurrentRow(index)
+        for row, page in enumerate(self.document["pages"]):
+            if page["id"] in keep:
+                item = self.pages.item(row)
+                if item is not None:
+                    item.setSelected(True)
         self.pages.blockSignals(False)
+        # 当前页已被删掉时，选中框的 id 一并作废，避免右栏显示上一页残留内容
+        if self.selected and not any(
+            r["id"] == self.selected for r in (self.page() or {}).get("regions", [])
+        ):
+            self.selected = None
         self.refresh_regions()
         self.update_page_labels()
 
@@ -3138,9 +3630,15 @@ class MangaPage(QWidget):
         if self.target.toPlainText() != r["target"]:
             self.target.setPlainText(r["target"])
         s = r["style"]
-        self.source_lock.setChecked(r["source_locked"])
-        self.target_lock.setChecked(r["target_locked"])
-        self.geometry_lock.setChecked(r["geometry_locked"])
+        # 锁定开关回填时也要屏蔽信号，否则 setChecked 会把用户的锁定状态当成新编辑写回
+        for widget, value in (
+            (self.source_lock, r["source_locked"]),
+            (self.target_lock, r["target_locked"]),
+            (self.geometry_lock, r["geometry_locked"]),
+        ):
+            widget.blockSignals(True)
+            widget.setChecked(value)
+            widget.blockSignals(False)
         for widget, key in [
             (self.size, "size"),
             (self.minimum, "min_size"),
@@ -3149,20 +3647,37 @@ class MangaPage(QWidget):
             (self.stroke, "stroke_width"),
         ]:
             widget.setValue(s[key])
-        self.vertical_button.setChecked(s["vertical"])
-        self.bold_button.setChecked(s["bold"])
+        for widget, value in (
+            (self.vertical_button, s["vertical"]),
+            (self.bold_button, s["bold"]),
+        ):
+            widget.blockSignals(True)
+            widget.setChecked(value)
+            widget.blockSignals(False)
         if s["font"] and self.font.findData(s["font"]) < 0:
             self.font.addItem(Path(s["font"]).name, s["font"])
-        self.font.setCurrentIndex(max(0, self.font.findData(s["font"])))
-        self.removal.setCurrentIndex(self.removal.findData(r["removal"]))
+        for widget, value in (
+            (self.font, s["font"]),
+            (self.removal, r["removal"]),
+        ):
+            widget.blockSignals(True)
+            widget.setCurrentIndex(max(0, widget.findData(value)))
+            widget.blockSignals(False)
         self.rotation.setValue(r["layout_rect"]["rotation"])
         self.punctuation_action.blockSignals(True)
         self.punctuation_action.setChecked(s.get("auto_punctuation", False))
         self.punctuation_action.blockSignals(False)
-        self.horizontal_button.setChecked(not s["vertical"])
-        self.vertical_button.setChecked(s["vertical"])
-        self.bold_button.setChecked(s["bold"])
-        self.align.setCurrentIndex(self.align.findData(s["align"]))
+        for widget, value in (
+            (self.horizontal_button, not s["vertical"]),
+            (self.vertical_button, s["vertical"]),
+            (self.bold_button, s["bold"]),
+        ):
+            widget.blockSignals(True)
+            widget.setChecked(value)
+            widget.blockSignals(False)
+        self.align.blockSignals(True)
+        self.align.setCurrentIndex(max(0, self.align.findData(s["align"])))
+        self.align.blockSignals(False)
         self.vertical_rtl.blockSignals(True)
         self.vertical_rtl.setVisible(bool(s["vertical"]))
         self.vertical_rtl.setChecked(bool(s.get("vertical_rtl", True)))
@@ -3187,7 +3702,7 @@ class MangaPage(QWidget):
             self.canvas.punctuation_rules = self.document["settings"].get(
                 "punctuation_rules"
             )
-            self.canvas.editable = self.variant.currentData() != "render"
+            self.canvas.editable = self.variant.currentData() not in {"render", "compare"}
             self.canvas.live_layout = editing and self.canvas.rect_key == "layout_rect"
             if editing and self.document["settings"].get("removal") == "fill":
                 data = self.fill_preview(data)
@@ -3198,25 +3713,42 @@ class MangaPage(QWidget):
 
                 from Shared.manga_lettering import render_text
 
-                image = Image.open(BytesIO(data)).convert("RGBA")
-                for r in self.page()["regions"]:
-                    if r.get("target"):
-                        tile, _ = render_text(
-                            r,
-                            punctuation_rules=self.document["settings"].get(
-                                "punctuation_rules"
-                            ),
-                        )
-                        image.alpha_composite(
-                            tile,
-                            (
-                                round(r["layout_rect"]["x"]),
-                                round(r["layout_rect"]["y"]),
-                            ),
-                        )
-                buffer = BytesIO()
-                image.save(buffer, "PNG")
-                data = buffer.getvalue()
+                # 合成整页要跑 PIL：同一页同一批文字框反复重绘（拖动缩放、
+                # 切列表行）时直接复用上一次结果，避免 GUI 线程每帧重算。
+                key = (
+                    self.page_id,
+                    self.epoch,
+                    self.canvas.rect_key,
+                    id(data),
+                    tuple(
+                        (r["id"], r.get("target", ""), repr(r["style"]), repr(r["layout_rect"]))
+                        for r in self.page()["regions"]
+                    ),
+                )
+                if self._canvas_cache_key == key and self._canvas_cache_data:
+                    data = self._canvas_cache_data
+                else:
+                    image = Image.open(BytesIO(data)).convert("RGBA")
+                    for r in self.page()["regions"]:
+                        if r.get("target"):
+                            tile, _ = render_text(
+                                r,
+                                punctuation_rules=self.document["settings"].get(
+                                    "punctuation_rules"
+                                ),
+                            )
+                            image.alpha_composite(
+                                tile,
+                                (
+                                    round(r["layout_rect"]["x"]),
+                                    round(r["layout_rect"]["y"]),
+                                ),
+                            )
+                    buffer = BytesIO()
+                    image.save(buffer, "PNG")
+                    data = buffer.getvalue()
+                    self._canvas_cache_key = key
+                    self._canvas_cache_data = data
             self.canvas.display(data, self.page(), selected)
             self.canvas.blockSignals(False)
 
@@ -3263,6 +3795,20 @@ class MangaPage(QWidget):
                 if cached_source is not None
                 else self.client.asset(doc, page, "source")
             )
+            if variant == "compare":
+                # 前后对比：左原图、右成品，一次请求拿两张拼好再交给画布，
+                # 避免在 GUI 线程里再跑一遍 PIL 合图。
+                response = self.client.backend.http.get(
+                    f"/api/v2/manga/{doc}/pages/{page}/render", timeout=60
+                )
+                if response.status_code == 404:
+                    return original, True, original
+                response.raise_for_status()
+                return (
+                    compose_compare(original, response.content),
+                    False,
+                    original,
+                )
             asset = (
                 "clean"
                 if variant == "edit" and precise
@@ -3349,8 +3895,22 @@ class MangaPage(QWidget):
             return
         super().keyPressEvent(event)
 
+    def flush_pending_edits(self):
+        """回填结束后补做表单加载期间被挡下的编辑。"""
+        pending, self.pending_edits = self.pending_edits, []
+        for label, action in pending:
+            if not self.document or self.loading_form:
+                return
+            self.edit(label, action)
+
     def edit(self, label, action):
-        if not self.document or self.loading_form:
+        if not self.document:
+            return
+        if self.loading_form:
+            # 之前这里是静默 return：导入工程后表单回填期间用户的输入会被吃掉。
+            # 现在改为排队，回填结束后立刻执行，避免「打字没反应」。
+            self.pending_edits.append((label, action))
+            self.status.setText("正在回填界面，稍后自动应用刚才的修改…")
             return
         before = deepcopy(self.document)
         action()
@@ -3719,6 +4279,50 @@ class MangaPage(QWidget):
         self.edit("设为新框默认样式", action)
         self.status.setText("新建立的文字框将使用该样式；已有框不变")
 
+    def save_style_preset(self):
+        """把当前框样式存成命名预设，供整部快速套用。"""
+        if not self.region():
+            self.status.setText("请先选中一个文字框作为预设模板")
+            return
+        presets = self.document["settings"].get("style_presets") or []
+        name, ok = QInputDialog.getText(
+            self,
+            "保存样式预设",
+            "预设名称（可写「旁白」「拟声词」等）",
+            QLineEdit.Normal,
+            f"预设{len(presets) + 1}",
+        )
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        style = deepcopy(self.region()["style"])
+
+        def action():
+            bucket = self.document["settings"].setdefault("style_presets", [])
+            existing = next((p for p in bucket if p["name"] == name), None)
+            if existing:
+                existing["style"] = deepcopy(style)
+            else:
+                bucket.append({"id": uuid4().hex, "name": name, "style": deepcopy(style)})
+
+        self.edit("保存样式预设", action)
+        self.status.setText(f"已保存样式预设「{name}」")
+
+    def open_style_presets(self):
+        if not self.document:
+            return
+        StylePresetsDialog(self).exec()
+
+    def open_replace(self):
+        if not self.document:
+            return
+        ReplaceDialog(self).exec()
+
+    def open_characters(self):
+        if not self.document:
+            return
+        CharactersDialog(self).exec()
+
     def pick_font(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "选择字体", "", "字体 (*.ttf *.ttc *.otf)"
@@ -3801,10 +4405,16 @@ class MangaPage(QWidget):
                 return
             if error:
                 self.saving = False
-                self.save_callbacks = []
-                self.status.setText("保存未完成，修改仍保留在编辑器：" + error)
+                # 原来这里把 save_callbacks 清空：保存失败后紧跟着的
+                # 「保存后执行识别/翻译/导出」永远不会触发，用户看到菜单点了没反应。
+                # 现在保留回调，50 ms 后重试保存，直到成功。
+                self.status.setText("保存未完成，正在重试：" + error)
                 if "(409)" in error:
                     self.recover_workspace(self.saved_snapshot)
+                    self.save_callbacks = []
+                    return
+                self.dirty = True
+                self.save_timer.start()
             else:
                 saved(result)
 
@@ -3893,7 +4503,12 @@ class MangaPage(QWidget):
         ocr_engine=None,
         provider_id=None,
     ):
-        if not self.document or self.job_id or self.submitting:
+        if not self.document:
+            return
+        if self.job_id or self.submitting:
+            # 原来这里静默 return：任务在跑时点菜单毫无反应，用户以为界面卡死
+            self.status.setText("已有任务在执行，请等它结束或先取消当前任务")
+            self.set_status_tone("warn")
             return
         if not saved:
             self.save(
@@ -4292,13 +4907,36 @@ class MangaPage(QWidget):
     def export(self):
         if not self.document:
             return
-        labels = ["PNG图片", "JPEG图片", "整批ZIP", "可编辑工程包"]
+        labels = [
+            "PNG图片",
+            "JPEG图片",
+            "整批ZIP",
+            "CBZ 漫画包（阅读器可直接打开）",
+            "PDF 文档",
+            "可编辑工程包",
+        ]
+        modes = ["png", "jpeg", "zip", "cbz", "pdf", "project"]
         label, ok = QInputDialog.getItem(self, "导出漫画", "格式", labels, 0, False)
         if not ok:
             return
         folder = QFileDialog.getExistingDirectory(self, "选择新的导出目录")
         if folder:
-            mode = ["png", "jpeg", "zip", "project"][labels.index(label)]
+            mode = modes[labels.index(label)]
+
+            def exported(result):
+                files = ", ".join(result.get("files", []))
+                quality = result.get("quality") or []
+                if quality:
+                    pages = {item.get("page_name") or item.get("page_id") for item in quality}
+                    self.set_status_tone("warn")
+                    self.status.setText(
+                        f"已导出：{files}　·　{len(quality)} 处文字溢出（{len(pages)} 页），"
+                        "可在「修复溢出」里批量处理"
+                    )
+                else:
+                    self.set_status_tone("ok")
+                    self.status.setText("已导出：" + files)
+
             self.save(
                 lambda: self.start_request(
                     lambda: self.client.request(
@@ -4307,9 +4945,7 @@ class MangaPage(QWidget):
                         json={"output_dir": folder, "mode": mode},
                         headers={"Prefer": "respond-async"},
                     ),
-                    lambda r: self.status.setText(
-                        "已导出：" + ", ".join(r.get("files", []))
-                    ),
+                    exported,
                 )
             )
 
