@@ -284,7 +284,10 @@ class ApiConfigDialog(QDialog):
         self.base_url = QLineEdit()
         self.base_url.setPlaceholderText("留空使用官方地址；也可填兼容网关")
         self.model_name = QLineEdit()
-        self.model_name.setPlaceholderText("如 gpt-4o-mini / gemini-2.0-flash")
+        self.model_name.setPlaceholderText(
+            "OpenAI: gpt-4o-mini · Gemini: gemini-2.0-flash · "
+            "百度: accurate / network（webimage）· Ollama: llava"
+        )
         form.addRow("AppID", self.appid)
         form.addRow("API Key", self.api_key)
         form.addRow("接口地址", self.base_url)

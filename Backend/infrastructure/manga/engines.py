@@ -983,7 +983,8 @@ def recognize(
         "api_ollama",
         "api_custom",
     }:
-        if not api_config:
+        # Ollama 是本地推理，缺省即可用（127.0.0.1:11434），其余需要凭据
+        if not api_config and backend != "api_ollama":
             raise PipelineError(
                 "MODEL_API_NOT_CONFIGURED",
                 "该 OCR 模型需要配置 API：请在模型中心点「配置 API」",

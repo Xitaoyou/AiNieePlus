@@ -335,7 +335,8 @@ class MangaService:
                             api_config = self.models.api_config(
                                 spec.get("api_provider")
                             )
-                            if not api_config:
+                            local_engine = backend == "api_ollama"
+                            if not api_config and not local_engine:
                                 raise PipelineError(
                                     "MODEL_API_NOT_CONFIGURED",
                                     "该 OCR 模型需要配置 API：请在模型中心点「配置 API」填写密钥",

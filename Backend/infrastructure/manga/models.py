@@ -434,8 +434,8 @@ CATALOGUE = [
         size_mb=0,
         url="",
         source="https://github.com/tesseract-ocr/tesseract",
-        advice="调用本机 tesseract 可执行与语言包；需先安装 tesseract 并加入 PATH",
-        supported=False,
+        advice="调用本机 tesseract 可执行与语言包；选它后若未安装会提示 pip/安装路径",
+        supported=True,
     ),
     dict(
         id="mit48px-ctc",
@@ -973,8 +973,9 @@ class ModelRegistry:
             if not base or not key:
                 return False, "Azure OCR 需要 Endpoint 与 Key"
             response = requests.get(
-                base.rstrip("/") + "/vision/v3.2/read/analyzeResults/probe",
+                base.rstrip("/") + "/vision/v2.0/ocr",
                 headers={"Ocp-Apim-Subscription-Key": key},
+                params={"language": "unk", "detectOrientation": "true"},
                 timeout=(10, 20),
             )
             if response.status_code in (401, 403):
