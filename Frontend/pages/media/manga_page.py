@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
+    QGraphicsView,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -410,29 +411,13 @@ IMAGE_FILTER = (
 
 
 def pick_image_paths(parent):
-    """One import entry accepts images, PDFs and directories together."""
-    dialog = MixedImportDialog(parent)
-    return dialog.paths if dialog.exec() == QDialog.Accepted else []
-
-
-class MixedImportDialog(QFileDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent, "导入图片、PDF 或文件夹")
-        self.setOption(QFileDialog.DontUseNativeDialog, True)
-        self.setFileMode(QFileDialog.ExistingFiles)
-        self.setNameFilter(IMAGE_FILTER)
-        self.setLabelText(QFileDialog.Accept, "导入所选文件或文件夹")
-        for view in self.findChildren(QAbstractItemView):
-            view.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.paths = []
-
-    def accept(self):
-        paths = [
-            str(Path(p).resolve()) for p in self.selectedFiles() if Path(p).exists()
-        ]
-        if paths:
-            self.paths = paths
-            QDialog.accept(self)
+    """系统原生多选对话框：一次选多张图片 / PDF。文件夹走独立入口。"""
+    paths, _ = QFileDialog.getOpenFileNames(
+        parent, "导入图片 / PDF", "", IMAGE_FILTER
+    )
+    return [
+        str(Path(p).resolve()) for p in paths if p and Path(p).exists()
+    ]
 
 
 class ImportDialog(QDialog):
@@ -641,9 +626,9 @@ class MangaPage(QWidget):
         self.variant.setCurrentIndex(self.variant.findData("source"))
         self.variant.currentIndexChanged.connect(self.change_view)
         self.source = QPlainTextEdit()
-        self.source.setMaximumHeight(110)
+        self.source.setMaximumHeight(88)
         self.target = QPlainTextEdit()
-        self.target.setMaximumHeight(110)
+        self.target.setMaximumHeight(88)
         self.source.installEventFilter(self)
         self.target.installEventFilter(self)
         self.source.setUndoRedoEnabled(False)
@@ -654,9 +639,16 @@ class MangaPage(QWidget):
         self.target.textChanged.connect(
             lambda: self.region_value("target", self.target.toPlainText())
         )
-        self.source_lock = QCheckBox("锁定原文")
-        self.target_lock = QCheckBox("锁定译文")
-        self.geometry_lock = QCheckBox("锁定区域")
+        # 锁定：原文 / 译文 行内小锁；区域锁定只在右键菜单
+        self.source_lock = QCheckBox(self)
+        self.source_lock.setToolTip(
+            "锁定后，整部识别 / OCR 与重做识别会跳过此框，保留此处原文"
+        )
+        self.target_lock = QCheckBox(self)
+        self.target_lock.setToolTip(
+            "锁定后，整部翻译与重做翻译会跳过此框，保留此处译文"
+        )
+        self.geometry_lock = QCheckBox(self)
         self.source_lock.toggled.connect(
             lambda v: self.region_value("source_locked", v)
         )
@@ -665,6 +657,22 @@ class MangaPage(QWidget):
         )
         self.geometry_lock.toggled.connect(
             lambda v: self.region_value("geometry_locked", v)
+        )
+        self.source_lock_button = TransparentToolButton(FluentIcon.PIN, self)
+        self.source_lock_button.setCheckable(True)
+        self.source_lock_button.setFixedSize(28, 28)
+        self.source_lock_button.setToolTip("锁定原文（批量识别/OCR 跳过此框）")
+        self.source_lock_button.toggled.connect(self.source_lock.setChecked)
+        self.source_lock.toggled.connect(
+            lambda v: self.source_lock_button.setChecked(v)
+        )
+        self.target_lock_button = TransparentToolButton(FluentIcon.PIN, self)
+        self.target_lock_button.setCheckable(True)
+        self.target_lock_button.setFixedSize(28, 28)
+        self.target_lock_button.setToolTip("锁定译文（批量翻译跳过此框）")
+        self.target_lock_button.toggled.connect(self.target_lock.setChecked)
+        self.target_lock.toggled.connect(
+            lambda v: self.target_lock_button.setChecked(v)
         )
         self.font = QComboBox()
         self.font.addItem("内置字体", "")
@@ -690,12 +698,14 @@ class MangaPage(QWidget):
         self.autofit.toggled.connect(
             lambda checked: checked and self.style_value("autofit", True)
         )
+        self.autofit.toggled.connect(self.refresh_font_mode_hint)
         self.fixed_size_button = TransparentPushButton("固定字号", self)
         self.fixed_size_button.setCheckable(True)
         self.fixed_size_button.setToolTip("手动指定字号；字号输入框中修改")
         self.fixed_size_button.toggled.connect(
             lambda checked: checked and self.style_value("autofit", False)
         )
+        self.fixed_size_button.toggled.connect(self.refresh_font_mode_hint)
         self.horizontal_button = TransparentPushButton("横", self)
         self.horizontal_button.setCheckable(True)
         self.horizontal_button.setToolTip("横排文字")
@@ -1034,8 +1044,8 @@ class MangaPage(QWidget):
         zoom_row.addWidget(self.variant)
         self.icon_button(zoom_row, FluentIcon.FIT_PAGE, "适应窗口", self.fit_canvas)
         self.zoom_slider = QSlider(Qt.Horizontal)
-        self.zoom_slider.setRange(2, 500)
-        self.zoom_slider.setFixedWidth(120)
+        self.zoom_slider.setRange(self.ZOOM_MIN, self.ZOOM_MAX)
+        self.zoom_slider.setFixedWidth(88)
         self.zoom_slider.setValue(100)
         self.zoom_label = QLabel("100%")
         self.zoom_slider.valueChanged.connect(self.set_zoom)
@@ -1045,8 +1055,8 @@ class MangaPage(QWidget):
         self.zoom_overlay.adjustSize()
         # ---- 右栏：文字 / 排版 / 阅读顺序（滚动，阅读顺序默认折叠）----
         scroll = QScrollArea()
-        scroll.setMinimumWidth(340)
-        scroll.setMaximumWidth(470)
+        scroll.setMinimumWidth(360)
+        scroll.setMaximumWidth(560)
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("QScrollArea {border:none;background:transparent;}")
         right_card = SimpleCardWidget()
@@ -1059,14 +1069,16 @@ class MangaPage(QWidget):
         text_header.addWidget(StrongBodyLabel("文字", right_card))
         text_header.addStretch(1)
         form.addRow(text_header)
-        form.addRow("原文", self.source)
-        form.addRow("译文", self.target)
-        lock_row = QHBoxLayout()
-        lock_row.addWidget(self.source_lock)
-        lock_row.addWidget(self.target_lock)
-        lock_row.addWidget(self.geometry_lock)
-        lock_row.addStretch(1)
-        form.addRow(lock_row)
+        source_row = QHBoxLayout()
+        source_row.setSpacing(4)
+        source_row.addWidget(self.source, 1)
+        source_row.addWidget(self.source_lock_button)
+        form.addRow("原文", source_row)
+        target_row = QHBoxLayout()
+        target_row.setSpacing(4)
+        target_row.addWidget(self.target, 1)
+        target_row.addWidget(self.target_lock_button)
+        form.addRow("译文", target_row)
         # ==== 排版 ====
         typography_header = QHBoxLayout()
         typography_header.addWidget(StrongBodyLabel("排版", right_card))
@@ -1076,9 +1088,14 @@ class MangaPage(QWidget):
         mode_row.setSpacing(4)
         mode_row.addWidget(self.autofit)
         mode_row.addWidget(self.fixed_size_button)
-        mode_row.addWidget(self.font, 1)
-        mode_row.addWidget(self.size)
+        mode_row.addStretch(1)
         form.addRow(mode_row)
+        font_row = QHBoxLayout()
+        font_row.setSpacing(6)
+        self.font.setMinimumWidth(120)
+        font_row.addWidget(self.font, 1)
+        font_row.addWidget(self.size)
+        form.addRow(font_row)
         form.addRow(self.font_mode_hint)
         common_row = QHBoxLayout()
         common_row.setSpacing(4)
@@ -1086,12 +1103,13 @@ class MangaPage(QWidget):
         common_row.addWidget(self.vertical_button)
         common_row.addWidget(self.bold_button)
         common_row.addWidget(self.color_button)
-        common_row.addWidget(self.align)
+        self.align.setMinimumWidth(96)
+        common_row.addWidget(self.align, 1)
         form.addRow(common_row)
         style_actions = QHBoxLayout()
+        style_actions.setSpacing(6)
         self.button(style_actions, "设为新框默认", self.set_default_style)
         self.button(style_actions, "应用到本页", lambda: self.apply_style(False))
-        self.button(style_actions, "应用到整部", lambda: self.apply_style(True))
         form.addRow(style_actions)
         advanced = QWidget(right_card)
         advanced_form = QFormLayout(advanced)
@@ -1154,8 +1172,8 @@ class MangaPage(QWidget):
         right_holder_layout = QVBoxLayout(right_holder)
         right_holder_layout.setContentsMargins(0, 0, 0, 0)
         right_holder_layout.addWidget(scroll)
-        right_holder.setMinimumWidth(340)
-        right_holder.setMaximumWidth(470)
+        right_holder.setMinimumWidth(360)
+        right_holder.setMaximumWidth(560)
         split.addWidget(right_holder)
         # QFormLayout creates plain QLabel objects from strings. Replace those
         # labels so they participate in Fluent's light/dark text styling too.
@@ -1168,7 +1186,7 @@ class MangaPage(QWidget):
                 label.hide()
                 label.deleteLater()
                 form.setWidget(row, QFormLayout.LabelRole, replacement)
-        split.setSizes([160, 900, 390])
+        split.setSizes([170, 880, 430])
         # ==== 任务进度面板（画布右下角浮动，随时可取消）====
         self.progress_label = QLabel("尚未开始翻译")
         self.progress_label.setWordWrap(True)
@@ -1470,17 +1488,25 @@ class MangaPage(QWidget):
         self.canvas.fitInView(self.canvas.sceneRect(), Qt.KeepAspectRatio)
         self.update_zoom(self.canvas.transform().m11())
 
+    ZOOM_MIN = 5
+    ZOOM_MAX = 800
+
     def set_zoom(self, value):
-        center = self.canvas.mapToScene(self.canvas.viewport().rect().center())
+        value = max(self.ZOOM_MIN, min(int(value), self.ZOOM_MAX))
+        # 以视口中心为锚点缩放，避免滚动条范围变化导致画面跳动
+        anchor = self.canvas.transformationAnchor()
+        self.canvas.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
         self.canvas.resetTransform()
         self.canvas.scale(value / 100, value / 100)
-        self.canvas.centerOn(center)
+        self.canvas.setTransformationAnchor(anchor)
         self.zoom_label.setText(f"{value}%")
 
     def update_zoom(self, scale):
-        percent = max(2, round(scale * 100))
+        percent = max(1, round(scale * 100))
         self.zoom_slider.blockSignals(True)
-        self.zoom_slider.setValue(percent)
+        self.zoom_slider.setValue(
+            max(self.ZOOM_MIN, min(percent, self.ZOOM_MAX))
+        )
         self.zoom_slider.blockSignals(False)
         self.zoom_label.setText(f"{percent}%")
         self.position_zoom_controls()
@@ -1506,6 +1532,20 @@ class MangaPage(QWidget):
             ),
         )
         self.progress_panel.raise_()
+
+    def refresh_font_mode_hint(self, *_):
+        region = self.region()
+        if not region:
+            self.font_mode_hint.setText("选择文字框后显示实际字号")
+            return
+        mode = "自动适配" if region["style"]["autofit"] else "固定字号"
+        hint = f"{mode}"
+        info = self.canvas.last_layout_info.get(region["id"]) if hasattr(
+            self.canvas, "last_layout_info"
+        ) else None
+        if info:
+            hint += f"：实际字号 {info['font_size']} px"
+        self.font_mode_hint.setText(hint)
 
     def show_layout_size(self, region_id, info):
         if region_id == self.selected and self.region():
@@ -2142,6 +2182,8 @@ class MangaPage(QWidget):
             self.source_lock,
             self.target_lock,
             self.geometry_lock,
+            self.source_lock_button,
+            self.target_lock_button,
         ):
             widget.setEnabled(bool(r))
         if not r:

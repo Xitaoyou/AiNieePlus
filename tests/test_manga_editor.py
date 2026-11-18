@@ -811,12 +811,12 @@ def test_punctuation_dialog_edits_same_saved_rules_and_toggle_does_not_restore_d
     dispose_editor(editor)
 
 
-def test_public_table_links_use_existing_main_window_pages_and_import_picker_accepts_directories(
+def test_public_table_links_use_existing_main_window_pages_and_native_import_picker(
     monkeypatch, tmp_path
 ):
-    from PyQt5.QtWidgets import QWidget
+    from PyQt5.QtWidgets import QFileDialog, QWidget
 
-    from Frontend.pages.media.manga_page import MixedImportDialog
+    from Frontend.pages.media import manga_page as module
 
     app = QApplication.instance()
 
@@ -837,34 +837,42 @@ def test_public_table_links_use_existing_main_window_pages_and_import_picker_acc
     ):
         editor.open_public_table(name)
         assert host.switched_to is getattr(host, name)
-    picker = MixedImportDialog(editor)
+    # 图片 / PDF 走系统原生多选对话框（不再用自绘 QFileDialog）
     file = tmp_path / "page.pdf"
     file.write_bytes(b"fixture")
-    monkeypatch.setattr(picker, "selectedFiles", lambda: [str(tmp_path), str(file)])
-    picker.accept()
-    assert set(picker.paths) == {str(tmp_path.resolve()), str(file.resolve())}
+    calls = []
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        lambda *a, **k: calls.append((a, k)) or ([str(file)], "图片与 PDF"),
+    )
+    picked = module.pick_image_paths(editor)
+    assert picked == [str(file.resolve())]
+    assert calls, "native getOpenFileNames must be used"
     assert ".pdf" in editor.start_page.drop_card.file_extensions
-    picker.deleteLater()
-    app.processEvents()
     dispose_editor(editor)
     host.deleteLater()
     app.processEvents()
 
 
-def test_import_dialog_accepts_selected_real_directory(tmp_path):
-    from Frontend.pages.media.manga_page import MixedImportDialog
+def test_import_folder_uses_native_directory_picker(monkeypatch):
+    from PyQt5.QtWidgets import QFileDialog
 
     app = QApplication.instance()
-    folder = tmp_path / "pictures"
-    folder.mkdir()
-    dialog = MixedImportDialog()
-    dialog.setDirectory(str(tmp_path))
-    dialog.selectFile(str(folder))
+    folder = "C:/fixture-folder"
+    editor = make_editor_for_actions()
+    seen = []
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: folder
+    )
+    editor.import_paths = lambda paths: seen.extend(paths)
+    editor.import_images(folder=True)
     app.processEvents()
-    dialog.accept()
-    assert dialog.paths == [str(folder.resolve())]
-    dialog.deleteLater()
-    app.processEvents()
+    assert seen == [folder]
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: "")
+    editor.import_images(folder=True)
+    assert seen == [folder], "取消目录选择不应触发导入"
+    dispose_editor(editor)
 
 
 def test_import_metadata_and_append_preserve_selected_languages(monkeypatch, tmp_path):

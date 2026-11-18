@@ -102,6 +102,7 @@ class RegionItem(QGraphicsRectItem):
     def notify_layout(canvas_ref, region_id, info):
         canvas = canvas_ref()
         if canvas is not None and not sip.isdeleted(canvas):
+            canvas.last_layout_info[region_id] = info
             canvas.layoutMeasured.emit(region_id, info)
 
     def mousePressEvent(self, event):
@@ -186,6 +187,7 @@ class MangaCanvas(QGraphicsView):
         self.pan_origin = None
         self.box_preview = None
         self.live_layout = False
+        self.last_layout_info = {}
         self.punctuation_rules = None
         self.editable = True
         self.persisted_lines = []
@@ -288,7 +290,7 @@ class MangaCanvas(QGraphicsView):
 
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        if 0.02 < self.transform().m11() * factor < 30:
+        if 0.05 < self.transform().m11() * factor < 8:
             self.scale(factor, factor)
             self.zoomChanged.emit(self.transform().m11())
 
