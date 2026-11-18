@@ -44,16 +44,80 @@ class MangaService:
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
 
-    # 这些模型的主业是切面板，文字框召回偏低：面板照用，文字框交给行级模型。
+    # 主业是切面板的检测器：面板照用，文字框交给行级模型。
     PANEL_ONLY_MODELS = ("manga-panel",)
+    # 输出「逐行 / 逐列」小框的检测器，必须先聚合成气泡才能用。
+    LINE_LEVEL_MODELS = ("japanese-lines", "ppocr-manga-det")
     # 行级文字框来源，按可靠性排序
     TEXT_LINE_FALLBACKS = ("japanese-lines", "ppocr-manga-det", "comic-speech-bubble")
 
-    def detect_text_lines(self, context, source, primary_id, confidence):
-        """用行级检测模型补齐文字框；不可用时返回空列表。"""
+    @staticmethod
+    def merge_into_bubbles(boxes):
+        """把同一气泡内的逐行/逐列框合并成一个框。
+
+        行级检测器（japanese-lines / ppocr-manga-det）会把一个气泡里的
+        每一列竖排文字各报一个框，直接拿去翻译就是一个气泡切成两段，
+        译文互不相干。这里按「相邻且重叠」聚类：竖排看横向间距 + 纵向
+        重叠，横排看纵向间距 + 横向重叠，再取包围盒。
+        """
+        items = [dict(box) for box in boxes if box.get("class_id") == 1]
+        count = len(items)
+        if count <= 1:
+            return items
+
+        parent = list(range(count))
+
+        def find(index):
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left, right):
+            root_left, root_right = find(left), find(right)
+            if root_left != root_right:
+                parent[root_right] = root_left
+
+        for i in range(count):
+            xi, yi, wi, hi = items[i]["rect"]
+            for j in range(i + 1, count):
+                xj, yj, wj, hj = items[j]["rect"]
+                gap_x = max(xi - (xj + wj), xj - (xi + wi))
+                gap_y = max(yi - (yj + hj), yj - (yi + hi))
+                overlap_x = min(xi + wi, xj + wj) - max(xi, xj)
+                overlap_y = min(yi + hi, yj + hj) - max(yi, yj)
+                overlap_w = min(wi, wj)
+                overlap_h = min(hi, hj)
+                # 竖排：同一列的左右相邻框，横向几乎贴住且纵向大半重叠
+                columns = (
+                    gap_x <= 0.30 * overlap_w and overlap_y >= 0.65 * overlap_h
+                )
+                # 横排：同一行的上下相邻框，纵向几乎贴住且横向大半重叠
+                rows = gap_y <= 0.25 * overlap_h and overlap_x >= 0.65 * overlap_w
+                if columns or rows:
+                    union(i, j)
+
+        groups = {}
+        for index in range(count):
+            groups.setdefault(find(index), []).append(items[index])
+        merged = []
+        for members in groups.values():
+            x = min(box["rect"][0] for box in members)
+            y = min(box["rect"][1] for box in members)
+            right = max(box["rect"][0] + box["rect"][2] for box in members)
+            bottom = max(box["rect"][1] + box["rect"][3] for box in members)
+            merged.append(
+                {
+                    "rect": [x, y, right - x, bottom - y],
+                    "score": max(box["score"] for box in members),
+                    "class_id": 1,
+                }
+            )
+        return merged
+
+    def detect_text_bubbles(self, context, source, confidence):
+        """取整框（已聚合）的文字框，而不是逐列小框。"""
         for model_id in self.TEXT_LINE_FALLBACKS:
-            if model_id == primary_id:
-                continue
             try:
                 folder = self.models.folder(model_id)
             except PipelineError:
@@ -76,9 +140,30 @@ class MangaService:
                 continue
             except (OSError, RuntimeError):
                 continue
-            if any(box["class_id"] == 1 for box in boxes):
-                return boxes
+            bubbles = self.merge_into_bubbles(boxes)
+            if bubbles:
+                return bubbles
         return []
+
+    @classmethod
+    def boxes_overlap(cls, left, right, iou_threshold=0.3, cover_threshold=0.6):
+        """两个框是否在说同一个气泡。
+
+        只看 IoU 会把「小框整个落在气泡里」判成不重叠（小框面积小，IoU 很低），
+        于是同一个气泡被重复加上一次。因此再补一个「交集 / 较小面积」的判据。
+        """
+        lx, ly, lw, lh = left
+        rx, ry, rw, rh = right
+        x0, y0 = max(lx, rx), max(ly, ry)
+        x1, y1 = min(lx + lw, rx + rw), min(ly + lh, ry + rh)
+        if x1 <= x0 or y1 <= y0:
+            return False
+        intersection = (x1 - x0) * (y1 - y0)
+        union = lw * lh + rw * rh - intersection
+        if union > 0 and intersection / union >= iou_threshold:
+            return True
+        smaller = min(lw * lh, rw * rh)
+        return smaller > 0 and intersection / smaller >= cover_threshold
 
     def compute(self, context, **kwargs):
         from concurrent.futures.process import BrokenProcessPool
@@ -296,31 +381,63 @@ class MangaService:
                             model_id=document.settings.detector,
                             confidence=document.settings.confidence,
                         )
-                        # 面板模型的文字框召回偏低（单页大图上甚至只剩一个整页
-                        # class 0 框）。面板结果照用，文字框统一由行级模型给出，
-                        # 才能避免「整部漫画只测出几个框」。
-                        needs_lines = (
-                            not results
-                            or not any(d["class_id"] == 1 for d in results)
-                            or document.settings.detector in self.PANEL_ONLY_MODELS
-                        )
-                        if needs_lines:
-                            lines = self.detect_text_lines(
-                                context,
-                                source,
-                                document.settings.detector,
-                                document.settings.confidence,
+                        detector = document.settings.detector
+                        own_text = [d for d in results if d["class_id"] == 1]
+                        own_panels = [d for d in results if d["class_id"] == 0]
+                        supplemented = False
+                        if detector in self.PANEL_ONLY_MODELS:
+                            # 面板模型自己也能报出几个有把握的气泡，别丢；
+                            # 只把行级聚合出的、它没覆盖到的气泡补进来。
+                            bubbles = self.detect_text_bubbles(
+                                context, source, document.settings.confidence
                             )
-                            if lines:
-                                results = [
-                                    d for d in results if d["class_id"] == 0
-                                ] + lines
-                                report.setdefault("fallback_pages", []).append(
-                                    {
-                                        "page_id": page.id,
-                                        "model": document.settings.detector,
-                                    }
+                            extra = [
+                                bubble
+                                for bubble in bubbles
+                                if not any(
+                                    self.boxes_overlap(bubble["rect"], own["rect"])
+                                    for own in own_text
                                 )
+                            ]
+                            if extra:
+                                results = own_panels + own_text + extra
+                                supplemented = True
+                        elif detector in self.LINE_LEVEL_MODELS:
+                            # 用户直接选了行级模型：它报的是逐列小框，必须聚合，
+                            # 否则一个气泡被切成几段分别翻译，译文互不相干。
+                            results = own_panels + self.merge_into_bubbles(results)
+                        else:
+                            # 整框级模型（legacy / japanese-manga / speech-bubble…）
+                            # 有时只报一两个小横条或干脆漏检。只有「明显偏少」
+                            # 才补一次行级检测，按 IoU 去重后与自身结果合并。
+                            covered = sum(
+                                box["rect"][2] * box["rect"][3] for box in own_text
+                            )
+                            sparse = len(own_text) < 2 or covered < (
+                                0.015 * page.width * page.height
+                            )
+                            if sparse:
+                                bubbles = self.detect_text_bubbles(
+                                    context, source, document.settings.confidence
+                                )
+                                extra = [
+                                    bubble
+                                    for bubble in bubbles
+                                    if not any(
+                                        self.boxes_overlap(bubble["rect"], own["rect"])
+                                        for own in own_text
+                                    )
+                                ]
+                                if extra:
+                                    results = own_panels + own_text + extra
+                                    supplemented = True
+                        if supplemented:
+                            report.setdefault("fallback_pages", []).append(
+                                {
+                                    "page_id": page.id,
+                                    "model": detector,
+                                }
+                            )
                         if not results:
                             report.setdefault("empty_pages", []).append(page.id)
                             continue

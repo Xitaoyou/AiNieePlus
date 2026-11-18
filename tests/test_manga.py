@@ -126,11 +126,11 @@ class StubService(MangaService):
     def compute(self, context, **kw):
         if kw["operation"] == "detect":
             if kw.get("model_id") in self.TEXT_LINE_FALLBACKS:
-                # 行级模型：只给文字框
+                # 行级模型：一个气泡被切成两列，另有一个独立气泡
                 return [
-                    {"class_id": 1, "score": 0.9, "rect": [20, 20, 100, 50]},
-                    {"class_id": 1, "score": 0.8, "rect": [130, 20, 90, 50]},
-                    {"class_id": 1, "score": 0.7, "rect": [20, 90, 100, 50]},
+                    {"class_id": 1, "score": 0.9, "rect": [20, 20, 50, 50]},
+                    {"class_id": 1, "score": 0.8, "rect": [72, 22, 48, 48]},
+                    {"class_id": 1, "score": 0.7, "rect": [150, 100, 60, 40]},
                 ]
             return [
                 {"class_id": 0, "score": 0.9, "rect": [0, 0, 240, 160]},
@@ -164,9 +164,9 @@ def test_panel_is_not_a_text_region(workspace):
         doc.id, "detect", page_ids=[doc.pages[0].id], options={"replace_regions": True}
     )
     page = result["workspace"]["pages"][0]
-    # 面板模型只贡献 panels；文字框由行级模型补齐（3 个），自身不产生 region
+    # 面板模型贡献 panels + 它自己有把握的 1 个气泡；行级聚合再补 1 个新气泡
     assert len(page["panels"]) == 1
-    assert len(page["regions"]) == 3
+    assert len(page["regions"]) == 2
     assert all(r["panel_id"] == page["panels"][0]["id"] for r in page["regions"])
 
 
@@ -179,10 +179,16 @@ def test_panel_model_lines_come_from_line_detector(workspace):
     assert report["errors"] == []
     assert len(report["fallback_pages"]) == 1
     assert report["fallback_pages"][0]["model"] == "manga-panel"
-    # 面板模型自身的 class 1 结果被行级模型替换，不会出现重复框
+    # 行级模型把同一气泡的两列聚成一个框，且不与主模型已报的框重复
     regions = result["workspace"]["pages"][0]["regions"]
-    rects = [(r["ocr_rect"]["x"], r["ocr_rect"]["y"]) for r in regions]
+    rects = [
+        (r["ocr_rect"]["x"], r["ocr_rect"]["y"], r["ocr_rect"]["width"], r["ocr_rect"]["height"])
+        for r in regions
+    ]
     assert len(rects) == len(set(rects))
+    assert not any(
+        MangaService.boxes_overlap(a, b) for i, a in enumerate(rects) for b in rects[i + 1 :]
+    )
 
 
 def test_translation_adapter_validates_real_intermediate_schema(workspace, monkeypatch):
