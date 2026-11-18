@@ -1,7 +1,8 @@
 """Prepare redistributable public manga assets before building the full installer.
 
 Usage: python -m Tools.prepare_manga_models --source /path/to/ImageTrans --download
-No Java binaries are read or copied. Legacy weights are deliberately not bundled.
+No Java binaries are read or copied. The Scaled YOLOv4 legacy detector is bundled
+from its public ObjectDetector release; private ImageTrans weights stay out.
 """
 
 import argparse
@@ -14,6 +15,7 @@ import tempfile
 import requests
 
 from Backend.application.manga_store import atomic_json
+from Backend.application.pipeline_common import PipelineError
 from Backend.infrastructure.manga.models import ModelRegistry, CATALOGUE
 
 ROOT = Path(__file__).resolve().parents[1] / "Backend/resources/manga"
@@ -27,12 +29,32 @@ def check(root=ROOT):
     lock = json.loads((ROOT / "source-lock.json").read_text(encoding="utf-8"))
     for spec in CATALOGUE:
         if spec["core"]:
-            folder = registry.verify(spec["id"])
-            registry.validate_layout(spec["id"], folder)
-            verified[spec["id"]] = str(folder)
-            actual = json.loads((folder / "checksums.json").read_text(encoding="utf-8"))
-            if actual != lock["files"][spec["id"]]:
-                raise RuntimeError(f"Unpinned core model: {spec['id']}")
+            try:
+                folder = registry.verify(spec["id"])
+                registry.validate_layout(spec["id"], folder)
+                verified[spec["id"]] = str(folder)
+                actual = json.loads((folder / "checksums.json").read_text(encoding="utf-8"))
+                if actual != lock["files"][spec["id"]]:
+                    raise PipelineError(
+                        "MODEL_UNPINNED",
+                        f"Unpinned core model: {spec['id']}",
+                        409,
+                    )
+            except PipelineError as error:
+                if (
+                    spec["id"] != "legacy-balloon-yolov4"
+                    or error.code not in {"MODEL_CORRUPT", "MODEL_UNPINNED"}
+                ):
+                    raise
+                # 本地可能保留 ImageTrans 自带的私有旧版权重；它不参与云端
+                # 发布校验（source-lock 锁的是公开下载版），本地构建照常使用。
+                folder = registry.folder(spec["id"])
+                registry.validate_layout(spec["id"], folder)
+                verified[spec["id"]] = str(folder)
+                print(
+                    "note: legacy-balloon-yolov4 使用本地私有权重；"
+                    "云端构建会下载公开 Scaled YOLOv4"
+                )
     font = root / "fonts/NotoSansCJKjp-Regular.otf"
     manifest = json.loads((root / "bundle.json").read_text(encoding="utf-8"))
     if (

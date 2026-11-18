@@ -10,6 +10,12 @@
       "license": "AGPL-3.0"
     },
     {
+      "id": "legacy-balloon-yolov4",
+      "source": "https://github.com/xulihang/ObjectDetector",
+      "url": "https://github.com/xulihang/ObjectDetector/releases/download/models/yolo_darknet.zip",
+      "license": "见 ObjectDetector 仓库说明"
+    },
+    {
       "id": "mangaocr",
       "source": "https://github.com/xulihang/mangaocr-onnx",
       "url": "https://github.com/xulihang/mangaocr-onnx/releases/download/models/",

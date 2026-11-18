@@ -57,7 +57,7 @@ CATALOGUE = [
         name="Japanese lines 行检测",
         role="detect",
         kind="local",
-        backend="yolo_generic",
+        backend="yolo_v8",
         core=False,
         advanced=False,
         requires_api=False,
@@ -75,7 +75,7 @@ CATALOGUE = [
         name="Japanese manga 气泡检测",
         role="detect",
         kind="local",
-        backend="yolo_generic",
+        backend="yolo_v8",
         core=False,
         advanced=False,
         requires_api=False,
@@ -93,7 +93,7 @@ CATALOGUE = [
         name="Chinese webtoon 条漫检测",
         role="detect",
         kind="local",
-        backend="yolo_generic",
+        backend="yolo_v8",
         core=False,
         advanced=False,
         requires_api=False,
@@ -111,7 +111,7 @@ CATALOGUE = [
         name="Korean webtoon 条漫检测",
         role="detect",
         kind="local",
-        backend="yolo_generic",
+        backend="yolo_v8",
         core=False,
         advanced=False,
         requires_api=False,
@@ -129,7 +129,7 @@ CATALOGUE = [
         name="Comic speech bubble 气泡检测",
         role="detect",
         kind="local",
-        backend="yolo_generic",
+        backend="yolo_v8",
         core=False,
         advanced=False,
         requires_api=False,
@@ -166,7 +166,7 @@ CATALOGUE = [
         name="Japanese manga（旧版权重）",
         role="detect",
         kind="local",
-        backend="yolo_generic",
+        backend="yolo_v8",
         core=False,
         advanced=True,
         requires_api=False,
@@ -219,21 +219,21 @@ CATALOGUE = [
     ),
     dict(
         id="legacy-balloon-yolov4",
-        name="Legacy 气泡 YOLOv4",
+        name="Legacy 气泡 Scaled YOLOv4",
         role="detect",
         kind="local",
         backend="yolov4",
-        core=False,
-        advanced=True,
+        core=True,
+        advanced=False,
         requires_api=False,
         api_provider=None,
         langs=["ja"],
         files=["model.weights", "model.cfg", "model.json"],
-        license="需核对原权重来源",
-        size_mb=282,
-        url="",
-        source="https://github.com/xulihang/balloon-dataset",
-        advice="与旧版参数一致；请从现有 ImageTrans 模型文件夹导入",
+        license="见 ObjectDetector 仓库说明",
+        size_mb=22,
+        url="https://github.com/xulihang/ObjectDetector/releases/download/models/yolo_darknet.zip",
+        source="https://github.com/xulihang/ObjectDetector",
+        advice="Scaled YOLOv4 日漫气泡检测（旧版）；内置随包提供，可离线使用",
     ),
     # ================= 本地 OCR（pip 模型 / ONNX 权重）=================
     dict(
@@ -905,7 +905,7 @@ class ModelRegistry:
             for i in session(str(folder / spec["files"][0])).get_inputs()
         }
         valid = (
-            (backend in {"yolo26", "yolo_generic"} and "images" in names)
+            (backend in {"yolo26", "yolo_generic", "yolo_v8"} and "images" in names)
             or (backend == "mangaocr" and names == {"pixel_values"})
             or (backend in {"rapidocr", "rapidocr_det"} and "x" in names)
             or (

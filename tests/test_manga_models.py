@@ -60,6 +60,20 @@ def test_catalogue_covers_detection_ocr_api_and_system_models():
     assert all(s.get("advanced") for s in heavy), "≥150MB 的非内置模型应标记为高级"
     assert any("japanese-manga" == s["id"] for s in detect)
     assert any(s["id"] == "ppocr-manga-det" for s in detect)
+    # legacy Scaled YOLOv4 默认自带；YOLOv8 系列使用经典输出后端
+    legacy = next(s for s in detect if s["id"] == "legacy-balloon-yolov4")
+    assert legacy["core"] is True and legacy["url"], "legacy 应随包提供"
+    assert legacy["backend"] == "yolov4"
+    for model_id in (
+        "japanese-lines",
+        "japanese-manga",
+        "chinese-webtoon",
+        "korean-webtoon",
+        "comic-speech-bubble",
+        "japanese-manga-old",
+    ):
+        spec = next(s for s in detect if s["id"] == model_id)
+        assert spec["backend"] == "yolo_v8", model_id
 
 
 def test_api_state_tracks_configuration(registry, monkeypatch):
@@ -108,7 +122,7 @@ def test_download_guards_explain_non_local_kinds(registry):
         "api-openai": "MODEL_API_ONLY",
         "paddleocr": "MODEL_PACKAGE_REQUIRED",
         "winrtocr": "MODEL_SYSTEM_OCR",
-        "legacy-balloon-yolov4": "MODEL_IMPORT_REQUIRED",
+        "manga-with-layout": "MODEL_IMPORT_REQUIRED",
     }
     for model_id, code in cases.items():
         with pytest.raises(PipelineError) as error:

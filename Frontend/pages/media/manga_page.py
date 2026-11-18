@@ -528,7 +528,10 @@ class ModelDialog(QDialog):
                 not model.get("installed"),
             )
         if model.get("installed"):
-            return "已安装", False
+            return (
+                ("内置随包" if model.get("core") else "已安装"),
+                False,
+            )
         if model.get("url"):
             return f"需下载 {model['size_mb']} MB", True
         return "需导入目录", True

@@ -92,6 +92,72 @@ def _ppocr_det(image, folder, confidence):
     return boxes
 
 
+def _yolo_v8(image, folder, confidence):
+    """YOLOv8 经典输出 [1, 4+nc, anchors]：转置 + 置信度过滤 + NMS。"""
+    import cv2
+    import json
+
+    params = json.loads((folder / "model.json").read_text(encoding="utf-8-sig"))
+    size_w = int(params.get("width", 640) or 640)
+    size_h = int(params.get("height", 640) or 640)
+    rgb = np.asarray(image.convert("RGB"))
+    height, width = rgb.shape[:2]
+    scale = min(size_w / width, size_h / height)
+    w, h = max(1, round(width * scale)), max(1, round(height * scale))
+    left, top = (size_w - w) // 2, (size_h - h) // 2
+    canvas = np.full((size_h, size_w, 3), 114, dtype=np.uint8)
+    canvas[top : top + h, left : left + w] = cv2.resize(rgb, (w, h))
+    tensor = canvas.transpose(2, 0, 1)[None].astype(np.float32) / 255
+    engine = session(str(folder / "model.onnx"))
+    output = np.asarray(engine.run(None, {engine.get_inputs()[0].name: tensor})[0])
+    arr = output.squeeze(0)
+    if arr.ndim != 2:
+        raise PipelineError(
+            "MODEL_OUTPUT_MISMATCH", "YOLOv8 输出维度异常", 422
+        )
+    if arr.shape[0] < arr.shape[1]:
+        arr = arr.T  # [anchors, 4+nc]
+    boxes, scores, class_ids = [], [], []
+    for row_values in arr:
+        if len(row_values) < 5:
+            continue
+        xywh = row_values[:4]
+        class_scores = row_values[4:]
+        if not np.isfinite(xywh).all() or not np.isfinite(class_scores).all():
+            continue
+        if class_scores.size == 0:
+            continue
+        class_id = int(class_scores.argmax())
+        score = float(class_scores[class_id])
+        if score < confidence:
+            continue
+        cx, cy, bw, bh = (float(v) for v in xywh)
+        x0 = max(0.0, (cx - bw / 2 - left) / scale)
+        y0 = max(0.0, (cy - bh / 2 - top) / scale)
+        x1 = min(float(width), (cx + bw / 2 - left) / scale)
+        y1 = min(float(height), (cy + bh / 2 - top) / scale)
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            continue
+        boxes.append([x0, y0, x1 - x0, y1 - y0])
+        scores.append(score)
+        class_ids.append(class_id)
+    if not boxes:
+        return []
+    indices = cv2.dnn.NMSBoxes(boxes, scores, confidence, 0.45)
+    result = []
+    for index in np.asarray(indices).flatten():
+        rect = boxes[int(index)]
+        # 这些模型按“气泡/文字”训练，统一作为文字框处理，避免误当分镜
+        result.append(
+            {
+                "rect": [float(v) for v in rect],
+                "score": float(scores[int(index)]),
+                "class_id": 1,
+            }
+        )
+    return result
+
+
 def detect(image, folder, model_id, confidence=0.5):
     import cv2
 
@@ -100,6 +166,8 @@ def detect(image, folder, model_id, confidence=0.5):
     backend = _model_backend(folder, model_id)
     if backend == "rapidocr_det":
         return _ppocr_det(image, folder, confidence)
+    if backend == "yolo_v8":
+        return _yolo_v8(image, folder, confidence)
     if model_id == "legacy-balloon-yolov4":
         import json
 
