@@ -688,21 +688,25 @@ def _ocr_youdao(image, config):
     buffer = BytesIO()
     image.convert("RGB").save(buffer, "PNG")
     payload = base64.b64encode(buffer.getvalue()).decode()
-    salt = uuid4().hex
-    sign = hashlib.sha256((appid + payload + salt + secret).encode()).hexdigest()
+    salt = str(uuid4().int % 100000)
+    curtime = str(int(time.time()))
+    sign = hashlib.sha256(
+        (appid + payload + salt + curtime + secret).encode()
+    ).hexdigest()
     response = requests.post(
         (config.get("base_url") or "https://openapi.youdao.com").rstrip("/")
-        + "/ocr_api",
+        + "/ocrapi",
         data={
-            "q": payload,
+            "img": payload,
+            "langType": config.get("model") or "ja",
+            "detectType": "10012",
+            "imageType": "1",
             "appKey": appid,
+            "docType": "json",
+            "signType": "v3",
+            "curtime": curtime,
             "salt": salt,
             "sign": sign,
-            "signType": "v3",
-            "docType": "json",
-            "languageType": config.get("model") or "ja",
-            "detectType": "10011",
-            "imageType": "1",
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=(10, 60),
@@ -742,8 +746,8 @@ def _ocr_azure(image, config):
         )
     buffer = BytesIO()
     image.convert("RGB").save(buffer, "PNG")
-    submit = requests.post(
-        endpoint + "/vision/v3.2/read/analyze",
+    response = requests.post(
+        endpoint + (config.get("model") or "/vision/v2.0/ocr"),
         headers={
             "Ocp-Apim-Subscription-Key": key,
             "Content-Type": "application/octet-stream",
@@ -751,30 +755,20 @@ def _ocr_azure(image, config):
         data=buffer.getvalue(),
         timeout=(10, 60),
     )
-    submit.raise_for_status()
-    location = submit.headers.get("Operation-Location")
-    if not location:
-        raise PipelineError(
-            "MODEL_API_ERROR", "Azure 未返回 Operation-Location", 409
-        )
-    for _ in range(20):
-        time.sleep(1)
-        poll = requests.get(
-            location, headers={"Ocp-Apim-Subscription-Key": key}, timeout=(10, 30)
-        )
-        poll.raise_for_status()
-        body = poll.json() or {}
-        status = str(body.get("status", "")).lower()
-        if status == "succeeded":
-            lines = []
-            for page in (body.get("analyzeResult") or {}).get("readResults") or []:
-                for line in page.get("lines") or []:
-                    if line.get("text"):
-                        lines.append(str(line["text"]))
-            return "\n".join(lines).strip()
-        if status == "failed":
-            raise PipelineError("MODEL_API_ERROR", "Azure OCR 识别失败", 409)
-    raise PipelineError("MODEL_API_TIMEOUT", "Azure OCR 轮询超时", 409)
+    response.raise_for_status()
+    body = response.json() or {}
+    lines = []
+    # ImageTrans 同款：v2.0 同步接口返回 regions[].lines[].text
+    for region in body.get("regions") or []:
+        for line in region.get("lines") or []:
+            words = " ".join(
+                str(word.get("text", "")) for word in line.get("words") or []
+            )
+            if words.strip():
+                lines.append(words.strip())
+            elif line.get("text"):
+                lines.append(str(line["text"]))
+    return "\n".join(lines).strip()
 
 
 def _ocr_ollama(image, config):
@@ -894,9 +888,19 @@ def _ocr_baidu(image, config):
     buffer = BytesIO()
     image.convert("RGB").save(buffer, "PNG")
     data = base64.b64encode(buffer.getvalue()).decode()
+    # 与 ImageTrans 一致的模式映射：accurate / accurateWithLocation /
+    # general / withLocation / network(webimage)
+    endpoint = {
+        "accurate": "/rest/2.0/ocr/v1/accurate_basic",
+        "accuratewithlocation": "/rest/2.0/ocr/v1/accurate",
+        "accurateWithLocation": "/rest/2.0/ocr/v1/accurate",
+        "general": "/rest/2.0/ocr/v1/general_basic",
+        "withlocation": "/rest/2.0/ocr/v1/general",
+        "network": "/rest/2.0/ocr/v1/webimage",
+    }.get(config.get("model") or "accurate", "/rest/2.0/ocr/v1/accurate_basic")
     response = requests.post(
         (config.get("base_url") or "https://aip.baidubce.com").rstrip("/")
-        + "/rest/2.0/ocr/v1/accurate_basic",
+        + endpoint,
         params={"access_token": token},
         data={"image": data, "detect_direction": "true"},
         headers={"Content-Type": "application/x-www-form-urlencoded"},

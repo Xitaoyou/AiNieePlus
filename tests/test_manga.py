@@ -109,6 +109,18 @@ class StubModels:
     def folder(self, model):
         return Path("/unused")
 
+    def spec(self, model):
+        from Backend.infrastructure.manga.models import CATALOGUE
+
+        found = next((s for s in CATALOGUE if s["id"] == model), None)
+        return found or {"id": model, "kind": "local", "backend": model}
+
+    def package_available(self, backend):
+        return True
+
+    def api_config(self, provider):
+        return {}
+
 
 class StubService(MangaService):
     def compute(self, context, **kw):
