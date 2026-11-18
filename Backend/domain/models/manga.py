@@ -37,6 +37,7 @@ class LetterStyle(MangaModel):
     autofit: bool = True
     auto_punctuation: bool = False
     vertical: bool = False
+    vertical_rtl: bool = True  # 竖排时从右往左（日式默认）
     bold: bool = False
     color: str = "#000000"
     stroke_color: str = "#ffffff"

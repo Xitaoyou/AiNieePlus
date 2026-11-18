@@ -635,9 +635,15 @@ def test_right_click_ocr_and_delete_apply_only_to_clicked_frame(monkeypatch):
     editor.region_context_menu(region_id, QPoint(0, 0))
     calls = []
     editor.run = lambda stage, **kw: calls.append((stage, kw))
-    next(a for a in actions if a.text() == "OCR 此框").trigger()
+    # 已有原文的框会先弹「重试并换引擎」确认框，测试里直接接受
+    from PyQt5.QtWidgets import QDialog
+
+    from Frontend.pages.media import manga_page as module
+
+    monkeypatch.setattr(module.RegionRetryDialog, "exec", lambda self: QDialog.Accepted)
+    next(a for a in actions if a.text().startswith("OCR 此框")).trigger()
     assert calls[-1][1]["region_ids"] == [region_id] and calls[-1][1]["scope"] == 0
-    next(a for a in actions if a.text() == "删除此框（可撤销）").trigger()
+    next(a for a in actions if a.text().startswith("删除此框")).trigger()
     assert (
         len(editor.page()["regions"]) == 1
         and editor.page()["regions"][0]["id"] != region_id

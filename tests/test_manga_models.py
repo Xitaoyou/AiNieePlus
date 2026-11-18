@@ -7,13 +7,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 
+_QT_APP = None  # 模块级持有，避免 QApplication 被回收导致 qconfig 失效
+
+
 @pytest.fixture(scope="module", autouse=True)
 def qt_application():
     from Frontend.platform.qt_runtime import configure_qt_plugins
 
+    global _QT_APP
     configure_qt_plugins()
-    app = QApplication.instance() or QApplication([])
-    yield app
+    _QT_APP = QApplication.instance() or QApplication([])
+    yield _QT_APP
 
 
 from pathlib import Path
@@ -58,7 +62,7 @@ def test_catalogue_covers_detection_ocr_api_and_system_models():
     assert any(s["id"] == "ppocr-manga-det" for s in detect)
 
 
-def test_api_state_tracks_configuration(registry):
+def test_api_state_tracks_configuration(registry, monkeypatch):
     def api_model(provider):
         return next(
             m
@@ -70,10 +74,28 @@ def test_api_state_tracks_configuration(registry):
     assert model["installed"] is False and model["api_ready"] is False
     registry.save_api_config("openai", {"api_key": "sk-test"})
     model = api_model("openai")
-    assert model["installed"] and model["api_ready"]
-    # 只填网关地址也算可用（兼容网关模式）
+    # 填了密钥但尚未验证：可选列表里不应出现
+    assert model["installed"] is True and model["api_ready"] is False
+    monkeypatch.setattr(
+        registry, "_probe_api", lambda backend, config: (True, "")
+    )
+    ok, message = registry.verify_api("openai")
+    assert ok and message == ""
+    assert api_model("openai")["api_ready"] is True
+    # 网关模式同样需要验证通过
     registry.save_api_config("gemini", {"base_url": "https://gw.local/v1"})
-    assert api_model("gemini")["api_ready"]
+    assert api_model("gemini")["api_ready"] is False
+    registry.verify_api("gemini")
+    assert api_model("gemini")["api_ready"] is True
+    # 验证失败要记录错误且不可选
+    monkeypatch.setattr(
+        registry, "_probe_api", lambda backend, config: (False, "鉴权失败")
+    )
+    registry.save_api_config("gemini", {"api_key": "bad"})
+    ok, message = registry.verify_api("gemini")
+    assert not ok and "鉴权失败" in message
+    model = api_model("gemini")
+    assert model["api_ready"] is False and "鉴权失败" in model["api_error"]
     # 清除后回到未启用
     registry.save_api_config("openai", {})
     model = api_model("openai")
@@ -131,24 +153,48 @@ def test_model_dialog_groups_and_marks_missing_api(registry):
     dialog = ModelDialog(editor)
     dialog.loaded({"models": registry.catalogue()})
     app.processEvents()
-    assert dialog.table.rowCount() == len(CATALOGUE)
-    # 分组顺序：第一行是检测模型
-    assert dialog.table.item(0, 1).text().startswith("检测")
+    # 分组标题行 + 每个模型一行
+    assert dialog.table.rowCount() >= len(CATALOGUE)
+    # 第一行是分组标题，第二行起是检测模型
+    assert "检测模型" in dialog.table.item(0, 0).text()
+    assert dialog.table.item(1, 1).text().startswith("检测")
     # tooltip 必须说明功能与来源
-    tooltip = dialog.table.item(0, 0).toolTip()
+    tooltip = dialog.table.item(1, 0).toolTip()
     assert "来源" in tooltip
     # 至少存在提示配置 API 或缺省状态的行
-    states = [dialog.table.item(r, 2).text() for r in range(dialog.table.rowCount())]
-    assert any("需要配置" in s or "未启用" in s or "已配置" in s for s in states)
+    states = [
+        dialog.table.item(r, 2).text()
+        for r in range(dialog.table.rowCount())
+        if dialog.table.item(r, 2) is not None
+    ]
+    assert any(
+        "需要配置" in s or "未配置" in s or "待验证" in s or "已就绪" in s
+        for s in states
+    )
     # 启用一个 API 模型后状态变为需要配置（红字）
     registry.save_api_config("gemini", {"api_key": "g-key"})
     dialog.loaded({"models": registry.catalogue()})
     app.processEvents()
-    states = [dialog.table.item(r, 2).text() for r in range(dialog.table.rowCount())]
-    assert "已配置" in states
+    states = [
+        dialog.table.item(r, 2).text()
+        for r in range(dialog.table.rowCount())
+        if dialog.table.item(r, 2) is not None
+    ]
+    assert "待验证" in states
+    registry._probe_api = lambda backend, config: (True, "")
+    registry.verify_api("gemini")
+    dialog.loaded({"models": registry.catalogue()})
+    app.processEvents()
+    states = [
+        dialog.table.item(r, 2).text()
+        for r in range(dialog.table.rowCount())
+        if dialog.table.item(r, 2) is not None
+    ]
+    assert "已就绪" in states
     dialog.deleteLater()
     editor.cleanup()
     editor.pool.waitForDone(3000)
+    editor.deleteLater()
     app.processEvents()
 
 

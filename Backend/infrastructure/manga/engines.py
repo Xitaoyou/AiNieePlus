@@ -188,6 +188,17 @@ def detect(image, folder, model_id, confidence=0.5):
     return result
 
 
+_ENGINE_CACHE = {}
+
+
+def _cached_engine(key, factory):
+    engine = _ENGINE_CACHE.get(key)
+    if engine is None:
+        engine = factory()
+        _ENGINE_CACHE[key] = engine
+    return engine
+
+
 def _ocr_openai(image, config):
     import base64
     from io import BytesIO
@@ -379,7 +390,10 @@ def recognize(
                 "PaddleOCR 需要先安装：pip install paddleocr paddlepaddle",
                 409,
             ) from error
-        engine = PaddleOCR(use_angle_cls=True, lang="japan", show_log=False)
+        engine = _cached_engine(
+            "paddle",
+            lambda: PaddleOCR(use_angle_cls=True, lang="japan", show_log=False),
+        )
         result = engine.ocr(np.asarray(image.convert("RGB")), cls=True)
         texts = [
             line[1][0]
@@ -397,7 +411,9 @@ def recognize(
                 "EasyOCR 需要先安装：pip install easyocr",
                 409,
             ) from error
-        reader = easyocr.Reader(["ja", "en"], gpu=False)
+        reader = _cached_engine(
+            "easyocr", lambda: easyocr.Reader(["ja", "en"], gpu=False)
+        )
         texts = reader.readtext(np.asarray(image.convert("RGB")), detail=0)
         return "\n".join(texts).strip()
     if backend == "doctr":
@@ -414,7 +430,9 @@ def recognize(
 
         buffer = BytesIO()
         image.convert("RGB").save(buffer, "PNG")
-        predictor = ocr_predictor(pretrained=True)
+        predictor = _cached_engine(
+            "doctr", lambda: ocr_predictor(pretrained=True)
+        )
         result = predictor([np.asarray(image.convert("RGB"))])
         words = []
 

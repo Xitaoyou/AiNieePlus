@@ -174,9 +174,14 @@ def render_text(
         stroke_width=stroke,
         stroke_fill=style["stroke_color"] if style["stroke_width"] else style["color"],
     )
+    rtl = style.get("vertical_rtl", True)
     for column, line in enumerate(lines):
         if vertical:
-            x = logical_w - cw - column * pitch
+            x = (
+                logical_w - cw - column * pitch
+                if rtl
+                else column * pitch
+            )
             for i, char in enumerate(line):
                 box = boxes[char]
                 if style.get("auto_punctuation") and char in {

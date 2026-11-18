@@ -166,6 +166,97 @@ class EditCommand(QUndoCommand):
         self.page.apply_edit(self.page.document)
 
 
+class RegionRetryDialog(QDialog):
+    """单框/多框重试：提示已有内容，并可临时更换 OCR / 翻译引擎。"""
+
+    def __init__(self, page, kind, region, region_ids=None):
+        super().__init__(page)
+        self.page = page
+        self.kind = kind
+        self.regions = region if isinstance(region, list) else [region]
+        region = self.regions[0]
+        self.region = region
+        self.ids = list(region_ids or [region["id"]])
+        self.multi = len(self.ids) > 1
+        title = ("重新 OCR " if kind == "ocr" else "重新翻译 ") + (
+            f"选中的 {len(self.ids)} 个框" if self.multi else "此框"
+        )
+        self.setWindowTitle(title)
+        self.resize(480, 240)
+        layout = QVBoxLayout(self)
+        field = "source" if kind == "ocr" else "target"
+        filled = [r for r in self.regions if r[field].strip()]
+        existing = filled[0][field].strip() if filled else ""
+        if self.multi:
+            text = (
+                f"选中的 {len(self.ids)} 个框中有 {len(filled)} 个已有"
+                + ("原文" if kind == "ocr" else "译文")
+                + "，重试会覆盖这 "
+                + str(len(filled))
+                + " 个框。"
+            )
+        else:
+            text = (
+                ("该框已有原文：" if kind == "ocr" else "该框已有译文：")
+                + (existing[:80] + ("…" if len(existing) > 80 else ""))
+            )
+        layout.addWidget(QLabel(text))
+        layout.addWidget(
+            QLabel("可以换一个引擎重试，其他框保持不变。")
+        )
+        form = QFormLayout()
+        self.engine = QComboBox()
+        self.fill_engines()
+        form.addRow("引擎", self.engine)
+        layout.addLayout(form)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        retry = PrimaryPushButton("重试")
+        retry.clicked.connect(self.accept)
+        retry.setDefault(True)
+        buttons.addWidget(cancel)
+        buttons.addWidget(retry)
+        layout.addLayout(buttons)
+
+    def fill_engines(self):
+        catalogue = getattr(self.page, "model_catalogue", None) or []
+        current = (
+            self.page.document["settings"]["ocr"]
+            if self.kind == "ocr"
+            else self.page.document["settings"].get("provider_id")
+        )
+        entries = []
+        if self.kind == "ocr":
+            for model in catalogue:
+                if model.get("role") != "ocr":
+                    continue
+                kind = model.get("kind", "local")
+                usable = (
+                    (kind in {"local", "system"} and model.get("installed"))
+                    or (kind == "package" and model.get("installed"))
+                    or (kind == "api" and model.get("api_ready"))
+                )
+                if usable:
+                    entries.append((model["name"], model["id"]))
+        else:
+            for index in range(self.page.provider.count()):
+                entries.append(
+                    (self.page.provider.itemText(index), self.page.provider.itemData(index))
+                )
+        if not entries:
+            entries = [("使用当前设置", None)]
+        for name, value in entries:
+            self.engine.addItem(name, value)
+        index = self.engine.findData(current)
+        if index >= 0:
+            self.engine.setCurrentIndex(index)
+
+    def engine_id(self):
+        return self.engine.currentData()
+
+
 class ApiConfigDialog(QDialog):
     """配置云 OCR 服务的 API Key / 网关地址 / 模型名。"""
 
@@ -237,15 +328,37 @@ class ApiConfigDialog(QDialog):
             return self.page.client.request("POST", "/model-apis", json=body)
 
         def done(result):
-            if "models" in result:
-                self.page.refresh_model_catalogue(result["models"])
-                self.status.setText("已保存" if payload else "已清除该服务配置")
-                if payload:
-                    self.accept()
-                else:
-                    self.reject()
-            else:
+            if "models" not in result:
                 self.status.setText(str(result.get("error", "保存失败")))
+                return
+            self.page.refresh_model_catalogue(result["models"])
+            if not payload:
+                self.status.setText("已清除该服务配置")
+                self.reject()
+                return
+            self.status.setText("已保存，正在验证…")
+            self.verify()
+
+        self.page.background(request, done)
+
+    def verify(self):
+        def request():
+            return self.page.client.request(
+                "POST", "/model-apis/verify", json={"provider": self.provider}
+            )
+
+        def done(result):
+            models = result.get("models")
+            if models:
+                self.page.refresh_model_catalogue(models)
+            if result.get("ok"):
+                self.status.setStyleSheet("")
+                self.status.setText("验证通过：该 OCR 已加入项目设置可选列表")
+                self.accept()
+            else:
+                message = result.get("message") or result.get("error") or "未知错误"
+                self.status.setText("验证失败：" + str(message))
+                self.status.setStyleSheet("color:#e74856;")
 
         self.page.background(request, done)
 
@@ -267,9 +380,9 @@ class ModelDialog(QDialog):
         self.intro.setWordWrap(True)
         layout.addWidget(self.intro)
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["模型", "类型", "状态", "大小", "功能说明", "来源许可"]
+            ["模型", "类型", "状态", "大小", "功能说明", "来源许可", "操作"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -278,7 +391,8 @@ class ModelDialog(QDialog):
         self.table.setColumnWidth(1, 90)
         self.table.setColumnWidth(2, 150)
         self.table.setColumnWidth(3, 70)
-        self.table.setColumnWidth(4, 380)
+        self.table.setColumnWidth(4, 360)
+        self.table.setColumnWidth(6, 96)
         layout.addWidget(self.table, 1)
         bar = QHBoxLayout()
         layout.addLayout(bar)
@@ -328,12 +442,49 @@ class ModelDialog(QDialog):
         return ("已安装" if model.get("installed") else "未安装"), False
 
     def configure_api(self):
-        model = self.selected()
+        self.configure_api_for(self.selected())
+
+    def configure_api_for(self, model):
         if not model or model.get("kind") != "api":
             self.status.setText("请选择一个云 API OCR 模型后再配置")
             return
         ApiConfigDialog(self.page, model).exec()
         self.refresh()
+
+    def download_for(self, model):
+        if not model:
+            return
+        self.status.setText(
+            f"正在下载 {model['name']}（{model['size_mb']} MB），可在主页面取消…"
+        )
+        self.page.start_request(
+            lambda: self.page.client.request(
+                "POST",
+                f"/models/{model['id']}/download",
+                headers={"Prefer": "respond-async"},
+            ),
+            lambda r: self.refresh(),
+        )
+
+    def import_for(self, model):
+        if not model:
+            return
+        self.select_row_for(model)
+        self.import_model()
+
+    def select_row_for(self, model):
+        for row, item in getattr(self, "row_models", {}).items():
+            if item is model:
+                self.table.setCurrentCell(row, 0)
+                return
+
+    def package_hint(self, model=None):
+        module = {"paddle": "paddleocr paddlepaddle", "easyocr": "easyocr", "doctr": "python-doctr"}.get(
+            (model or {}).get("backend", ""), "对应依赖"
+        )
+        self.status.setText(
+            f"在 AiNiee 的运行环境执行：pip install {module}，首次使用会自动下载模型权重"
+        )
 
     def apply_theme(self, *_):
         background = "#202020" if isDarkTheme() else "#f7f9fc"
@@ -344,20 +495,93 @@ class ModelDialog(QDialog):
             lambda: self.page.client.request("GET", "/models"), self.loaded
         )
 
-    ORDER = {"detect": 0, "ocr": 1, "package": 2, "api": 3, "system": 4, "inpaint": 5}
+    GROUPS = [
+        ("检测模型（按语言选择）", lambda m: m.get("role") == "detect"),
+        (
+            "本地 OCR（内置 / ONNX 权重）",
+            lambda m: m.get("role") == "ocr" and m.get("kind", "local") == "local",
+        ),
+        ("pip 包 OCR（首次使用时自动下载模型）", lambda m: m.get("kind") == "package"),
+        ("云 API OCR（需配置密钥并验证）", lambda m: m.get("kind") == "api"),
+        ("系统 OCR（无需下载）", lambda m: m.get("kind") == "system"),
+        ("去字模型", lambda m: m.get("role") == "inpaint"),
+    ]
+
+    def row_state(self, model):
+        kind = model.get("kind", "local")
+        if not model.get("supported", True):
+            return "尚未适配", True
+        if kind == "api":
+            if not model.get("installed"):
+                return "未配置", False
+            if not model.get("api_has_key"):
+                return "待填写密钥", True
+            if not model.get("api_verified"):
+                error = model.get("api_error") or ""
+                return ("验证失败：" + error[:40]) if error else "待验证", True
+            return "已就绪", False
+        if kind == "system":
+            return ("系统可用" if model.get("installed") else "系统不支持"), False
+        if kind == "package":
+            return (
+                ("依赖已就绪" if model.get("installed") else "需安装 pip 包"),
+                not model.get("installed"),
+            )
+        if model.get("installed"):
+            return "已安装", False
+        if model.get("url"):
+            return f"需下载 {model['size_mb']} MB", True
+        return "需导入目录", True
+
+    def action_for(self, model):
+        """每行最右的操作按钮：文本 + 回调（无则禁用）。"""
+        kind = model.get("kind", "local")
+        if not model.get("supported", True):
+            return "未适配", None
+        if kind == "api":
+            if model.get("api_verified"):
+                return "重新配置", self.configure_api_for
+            return "配置 API", self.configure_api_for
+        if kind == "system":
+            return ("可用" if model.get("installed") else "不支持"), None
+        if kind == "package":
+            if model.get("installed"):
+                return "已就绪", None
+            return "安装说明", self.package_hint
+        if model.get("installed"):
+            return "已安装", None
+        if model.get("url"):
+            return "一键下载", self.download_for
+        return "导入目录", self.import_for
 
     def loaded(self, data):
         models = list(data.get("models", []))
-        models.sort(
-            key=lambda m: (
-                self.ORDER.get(m.get("kind") if m.get("kind") != "local" else m.get("role", "local"), 9),
-                m.get("advanced", False),
-                m.get("name", ""),
-            )
-        )
         self.models = models
-        self.table.setRowCount(len(models))
-        for row, model in enumerate(models):
+        self.table.clearSpans()
+        self.table.setRowCount(0)
+        rows = []
+        for title, predicate in self.GROUPS:
+            items = [m for m in models if predicate(m)]
+            if not items:
+                continue
+            items.sort(key=lambda m: (m.get("advanced", False), m.get("name", "")))
+            rows.append((title, None))
+            rows.extend((None, model) for model in items)
+        self.table.setRowCount(len(rows))
+        self.row_models = {}
+        red = QColor("#e74856")
+        for row, (title, model) in enumerate(rows):
+            if model is None:
+                cell = QTableWidgetItem(title)
+                font = cell.font()
+                font.setBold(True)
+                cell.setFont(font)
+                cell.setFlags(Qt.ItemIsEnabled)
+                cell.setBackground(QColor(0, 0, 0, 12))
+                self.table.setItem(row, 0, cell)
+                self.table.setSpan(row, 0, row, self.table.columnCount())
+                continue
+            self.row_models[row] = model
             kind = model.get("kind", "local")
             label = (
                 self.KIND_LABELS.get(kind, kind)
@@ -379,46 +603,62 @@ class ModelDialog(QDialog):
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if col == 2 and warn:
-                    item.setForeground(QColor("#e74856"))
+                    item.setForeground(red)
                 tooltip = model["advice"]
                 if model.get("langs"):
                     tooltip += "\n支持语言：" + ", ".join(model["langs"])
                 if model.get("source"):
                     tooltip += "\n来源：" + model["source"]
                 if kind == "api" and not model.get("api_ready"):
-                    tooltip += "\n⚠ 已选择但尚未配置 API Key"
+                    tooltip += "\n⚠ 需要配置 API 并通过验证后才会出现在项目设置里"
                 item.setToolTip(tooltip)
                 self.table.setItem(row, col, item)
-            # 标记未配置 API 的行：状态列红字已足够；再加浅色底提示
-            if kind == "api" and model.get("installed") and not model.get("api_ready"):
+            if kind == "api" and not model.get("api_ready"):
                 for col in range(self.table.columnCount()):
                     cell = self.table.item(row, col)
-                    if cell is not None:
+                    if cell is not None and col != 6:
                         cell.setBackground(QColor(231, 72, 86, 24))
+            text, callback = self.action_for(model)
+            button = QPushButton(text)
+            button.setMinimumHeight(26)
+            if callback is None:
+                button.setEnabled(False)
+            else:
+                button.clicked.connect(
+                    lambda checked=False, action=callback, target=model: action(target)
+                )
+            self.table.setCellWidget(row, 6, button)
         self.table.resizeColumnsToContents()
-        self.table.setColumnWidth(4, 380)
-        configured = sum(
-            1
+        self.table.setColumnWidth(4, 360)
+        self.table.setColumnWidth(6, 96)
+        pending = [
+            m
             for m in models
-            if m.get("kind") == "api" and m.get("api_ready")
-        )
-        pending = sum(
-            1
+            if m.get("kind") == "api" and m.get("installed") and not m.get("api_verified")
+        ]
+        downloadable = [
+            m
             for m in models
-            if m.get("kind") == "api" and m.get("installed") and not m.get("api_ready")
-        )
+            if m.get("kind", "local") == "local"
+            and not m.get("installed")
+            and m.get("url")
+            and m.get("supported", True)
+        ]
         if pending:
             self.status.setText(
-                f"{pending} 个云 API OCR 已启用但未配置密钥，选中后点「配置 API」"
+                f"{len(pending)} 个云 API OCR 待验证：点「配置 API」填好密钥并验证后才可选"
             )
-        elif configured:
-            self.status.setText(f"已配置 {configured} 个云 API OCR")
+        elif downloadable:
+            total = sum(m.get("size_mb", 0) for m in downloadable)
+            self.status.setText(
+                f"{len(downloadable)} 个模型可下载（合计约 {total} MB），点行尾「一键下载」"
+            )
         else:
             self.status.setText("")
 
     def selected(self):
         row = self.table.currentRow()
-        return self.models[row] if row >= 0 else None
+        return getattr(self, "row_models", {}).get(row)
 
     def download(self):
         model = self.selected()
@@ -913,6 +1153,15 @@ class MangaPage(QWidget):
         self.color_button = TransparentToolButton(FluentIcon.PALETTE, self)
         self.color_button.setToolTip("文字颜色")
         self.color_button.clicked.connect(lambda: self.pick_color("color"))
+        self.vertical_rtl = QCheckBox("竖排从右往左", self)
+        self.vertical_rtl.setChecked(True)
+        self.vertical_rtl.setToolTip(
+            "竖排阅读方向：日式漫画默认从右往左；取消勾选则从左往右"
+        )
+        self.vertical_rtl.toggled.connect(
+            lambda v: self.style_value("vertical_rtl", v)
+        )
+        self.vertical_rtl.hide()
         self.align = QComboBox()
         for title, value in [("左对齐", "left"), ("居中", "center"), ("右对齐", "right")]:
             self.align.addItem(title, value)
@@ -1246,6 +1495,13 @@ class MangaPage(QWidget):
         zoom_row.addWidget(self.zoom_slider)
         zoom_row.addWidget(self.zoom_label)
         self.zoom_overlay.adjustSize()
+        self.pan_hint = SimpleCardWidget(self.canvas.viewport())
+        pan_row = QHBoxLayout(self.pan_hint)
+        pan_row.setContentsMargins(10, 6, 10, 6)
+        self.pan_hint_label = QLabel("按住鼠标中键拖动画面")
+        pan_row.addWidget(self.pan_hint_label)
+        self.pan_hint.adjustSize()
+        self.pan_hint.hide()
         # ---- 右栏：文字 / 排版 / 阅读顺序（滚动，阅读顺序默认折叠）----
         scroll = QScrollArea()
         scroll.setMinimumWidth(360)
@@ -1291,6 +1547,7 @@ class MangaPage(QWidget):
         self.align.setMinimumWidth(96)
         common_row.addWidget(self.align, 1)
         form.addRow(common_row)
+        form.addRow(self.vertical_rtl)
         style_actions = QHBoxLayout()
         style_actions.setSpacing(6)
         self.button(style_actions, "设为新框默认", self.set_default_style)
@@ -1687,6 +1944,7 @@ class MangaPage(QWidget):
         self.canvas.scale(value / 100, value / 100)
         self.canvas.setTransformationAnchor(anchor)
         self.zoom_label.setText(f"{value}%")
+        self.maybe_show_pan_hint(value / 100)
 
     def update_zoom(self, scale):
         percent = max(1, round(scale * 100))
@@ -1697,6 +1955,7 @@ class MangaPage(QWidget):
         self.zoom_slider.blockSignals(False)
         self.zoom_label.setText(f"{percent}%")
         self.position_zoom_controls()
+        self.maybe_show_pan_hint(percent / 100)
 
     def position_zoom_controls(self):
         self.zoom_overlay.adjustSize()
@@ -1705,6 +1964,40 @@ class MangaPage(QWidget):
             max(0, self.canvas.viewport().height() - self.zoom_overlay.height() - 10),
         )
         self.zoom_overlay.raise_()
+
+    def position_pan_hint(self):
+        self.pan_hint.adjustSize()
+        self.pan_hint.move(
+            max(10, (self.canvas.viewport().width() - self.pan_hint.width()) // 2),
+            14,
+        )
+        self.pan_hint.raise_()
+
+    def maybe_show_pan_hint(self, scale):
+        """画面比“适应窗口”更大时，提示可以用中键拖动。"""
+        if not getattr(self, "pan_hint", None) or not self.image_data:
+            return
+        scene = self.canvas.sceneRect()
+        viewport = self.canvas.viewport()
+        if scene.width() <= 0 or scene.height() <= 0:
+            return
+        fit = min(
+            viewport.width() / scene.width(),
+            viewport.height() / scene.height(),
+        )
+        if scale <= fit * 1.03:
+            self.pan_hint.hide()
+            return
+        import time
+
+        now = time.monotonic()
+        if now - getattr(self, "_pan_hint_at", 0.0) < 8:
+            return
+        self._pan_hint_at = now
+        self.pan_hint_label.setText("按住鼠标中键拖动画面")
+        self.pan_hint.show()
+        self.position_pan_hint()
+        QTimer.singleShot(3200, self.pan_hint.hide)
 
     def position_progress_panel(self):
         self.progress_panel.adjustSize()
@@ -1756,6 +2049,8 @@ class MangaPage(QWidget):
         super().resizeEvent(event)
         if not self.progress_panel.isHidden():
             self.position_progress_panel()
+        if getattr(self, "pan_hint", None) and not self.pan_hint.isHidden():
+            self.position_pan_hint()
 
     def eventFilter(self, watched, event):
         if (
@@ -1832,56 +2127,211 @@ class MangaPage(QWidget):
         layout.addWidget(button)
         return button
 
-    def region_context_menu(self, region_id, position):
-        if not any(
-            r["id"] == region_id
-            for r in (self.page() or {}).get("regions", [])
-        ):
+    def with_region(self, region_id, action):
+        self.select_region(region_id)
+        action()
+
+    def ask_region_ocr(self, region_id):
+        region = next(
+            (
+                r
+                for r in (self.page() or {}).get("regions", [])
+                if r["id"] == region_id
+            ),
+            None,
+        )
+        if not region:
             return
+        if region["source"].strip():
+            dialog = RegionRetryDialog(self, "ocr", region)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            self.run(
+                "ocr",
+                scope=0,
+                region_ids=[region_id],
+                ocr_engine=dialog.engine_id(),
+            )
+        else:
+            self.run("ocr", scope=0, region_ids=[region_id])
+
+    def ask_region_translate(self, region_id):
+        region = next(
+            (
+                r
+                for r in (self.page() or {}).get("regions", [])
+                if r["id"] == region_id
+            ),
+            None,
+        )
+        if not region:
+            return
+        if region["target"].strip():
+            dialog = RegionRetryDialog(self, "translate", region)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            self.run(
+                "translate",
+                scope=0,
+                region_ids=[region_id],
+                provider_id=dialog.engine_id(),
+            )
+        else:
+            self.run("translate", scope=0, region_ids=[region_id])
+
+    def region_selection(self, region_id):
+        """右键目标 + 当前画布选中：返回要批量操作的框 id 列表。"""
+        regions = (self.page() or {}).get("regions", [])
+        if not any(r["id"] == region_id for r in regions):
+            return []
+        selected = set(self.canvas.selected_ids())
+        if region_id not in selected:
+            selected = {region_id}
+        return [r["id"] for r in regions if r["id"] in selected]
+
+    def erase_regions(self, ids):
+        ids = set(ids)
+
+        def action():
+            for region in self.page()["regions"]:
+                if region["id"] in ids:
+                    region["erase_only"] = True
+
+        self.edit("去除框内原文", action)
+        self.variant.setCurrentIndex(self.variant.findData("edit"))
+        self.draw_canvas()
+
+    def clear_region_texts(self, ids, field):
+        ids = set(ids)
+
+        def action():
+            for region in self.page()["regions"]:
+                if region["id"] in ids:
+                    region[field] = ""
+                    region["translation_state"], region["translation_error"] = (
+                        "idle",
+                        "",
+                    )
+
+        label = "清除译文" if field == "target" else "清除原文"
+        self.edit(f"批量{label}", action)
+        self.status.setText(f"已清除 {len(ids)} 个框的{label[2:]}（可撤销）")
+
+    def set_style_values(self, ids, key, value):
+        ids = set(ids)
+
+        def action():
+            for region in self.page()["regions"]:
+                if region["id"] in ids:
+                    region["style"][key] = value
+
+        self.edit("批量修改排版", action)
+
+    def ask_regions_ocr(self, ids):
+        ids = list(ids)
+        if not ids:
+            return
+        regions = [r for r in self.page()["regions"] if r["id"] in set(ids)]
+        if any(r["source"].strip() for r in regions):
+            dialog = RegionRetryDialog(self, "ocr", regions, ids)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            self.run("ocr", scope=0, region_ids=ids, ocr_engine=dialog.engine_id())
+        else:
+            self.run("ocr", scope=0, region_ids=ids)
+
+    def ask_regions_translate(self, ids):
+        ids = list(ids)
+        if not ids:
+            return
+        regions = [r for r in self.page()["regions"] if r["id"] in set(ids)]
+        if any(r["target"].strip() for r in regions):
+            dialog = RegionRetryDialog(self, "translate", regions, ids)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            self.run(
+                "translate", scope=0, region_ids=ids, provider_id=dialog.engine_id()
+            )
+        else:
+            self.run("translate", scope=0, region_ids=ids)
+
+    def ask_region_ocr(self, region_id):
+        self.ask_regions_ocr([region_id])
+
+    def ask_region_translate(self, region_id):
+        self.ask_regions_translate([region_id])
+
+    def region_context_menu(self, region_id, position):
+        ids = self.region_selection(region_id)
+        if not ids:
+            return
+        batch = len(ids) > 1
+        suffix = f"（{len(ids)} 个框）" if batch else ""
         menu = RoundMenu(parent=self.canvas)
-        for icon, title, callback in [
-            (FluentIcon.BROOM, "去除框内原文（可撤销）", self.erase_region),
-            (
+        menu.addAction(
+            Action(
+                FluentIcon.DELETE,
+                f"删除此框{suffix}" if not batch else f"删除选中的 {len(ids)} 个框",
+                triggered=lambda: self.delete_regions(ids),
+            )
+        )
+        menu.addAction(
+            Action(
                 FluentIcon.SYNC,
-                "OCR 此框",
-                lambda: self.run("ocr", scope=0, region_ids=[region_id]),
-            ),
-            (FluentIcon.LANGUAGE, "翻译选中框", lambda: self.run("translate", scope=2)),
-            (
+                f"OCR 此框{suffix}" if not batch else f"OCR 选中的 {len(ids)} 个框",
+                triggered=lambda: self.ask_regions_ocr(ids),
+            )
+        )
+        menu.addAction(
+            Action(
+                FluentIcon.LANGUAGE,
+                f"翻译此框{suffix}" if not batch else f"翻译选中的 {len(ids)} 个框",
+                triggered=lambda: self.ask_regions_translate(ids),
+            )
+        )
+        advanced = RoundMenu("高级", parent=menu)
+        advanced.addAction(
+            Action(
+                FluentIcon.BROOM,
+                "去除框内原文" + suffix,
+                triggered=lambda: self.erase_regions(ids),
+            )
+        )
+        advanced.addAction(
+            Action(
                 FluentIcon.CLEAR_SELECTION,
-                "清除此框译文（可撤销）",
-                lambda: self.clear_region_text(region_id, "target"),
-            ),
-            (
+                "清除此框译文" + suffix,
+                triggered=lambda: self.clear_region_texts(ids, "target"),
+            )
+        )
+        advanced.addSeparator()
+        advanced.addAction(
+            Action(
                 FluentIcon.CUT,
                 "调整取字范围…",
-                lambda: self.enter_geometry_mode("ocr_rect"),
-            ),
-            (
+                triggered=lambda: self.with_region(
+                    region_id, lambda: self.enter_geometry_mode("ocr_rect")
+                ),
+            )
+        )
+        advanced.addAction(
+            Action(
                 FluentIcon.DELETE,
                 "调整去字范围…",
-                lambda: self.enter_geometry_mode("erase_rect"),
-            ),
-            (
-                FluentIcon.FONT_SIZE,
-                "自动适应框大小",
-                lambda: self.style_value("autofit", True),
-            ),
-            (
-                FluentIcon.DELETE,
-                "删除此框（可撤销）",
-                lambda: self.delete_regions([region_id]),
-            ),
-            (FluentIcon.LEFT_ARROW, "撤销", self.undo.undo),
-            (FluentIcon.RIGHT_ARROW, "重做", self.undo.redo),
-        ]:
-            menu.addAction(
-                Action(
-                    icon,
-                    title,
-                    triggered=lambda checked=False, action=callback: action(),
-                )
+                triggered=lambda: self.with_region(
+                    region_id, lambda: self.enter_geometry_mode("erase_rect")
+                ),
             )
+        )
+        advanced.addAction(
+            Action(
+                FluentIcon.FONT_SIZE,
+                "自动适应框大小" + suffix,
+                triggered=lambda: self.set_style_values(ids, "autofit", True),
+            )
+        )
+        # qfluentwidgets 的 RoundMenu 需显式挂子菜单
+        menu.addAction(advanced.menuAction())
         menu.exec(position)
 
     def erase_region(self):
@@ -2131,13 +2581,16 @@ class MangaPage(QWidget):
         if not hasattr(self, "project_summary_button"):
             return
         detector = self.detector.currentText()
+        ocr = self.ocr.currentText()
         source = self.source_language.currentText()
         target = self.target_language.currentText()
-        self.project_summary_button.setText(f"{detector} · {source}→{target}")
+        self.project_summary_button.setText(
+            f"气泡检测：{detector}   ·   OCR：{ocr}"
+        )
         self.project_summary_button.setToolTip(
-            f"检测模型 {detector} · OCR {self.ocr.currentText()} · "
-            f"原文 {source} · 译文 {target} · 阈值 {self.confidence.value():.2f}。"
-            "点击修改模型与语言设置。"
+            f"气泡检测模型：{detector}\nOCR 模型：{ocr}\n"
+            f"语言：{source} → {target} · 阈值 {self.confidence.value():.2f}\n"
+            "点击打开项目设置，可修改模型、语言与接口。"
         )
 
     def open_project_settings(self):
@@ -2333,6 +2786,8 @@ class MangaPage(QWidget):
             self.follow_banner.show()
         self.follow_progress = False
         self.page_id = self.document["pages"][index]["id"]
+        if getattr(self, "pan_hint", None):
+            self.pan_hint.hide()
         self.image_data = None
         self.canvas.scene().clear()
         self.selected = None
@@ -2429,6 +2884,7 @@ class MangaPage(QWidget):
             self.fixed_size_button,
             self.horizontal_button,
             self.vertical_button,
+            self.vertical_rtl,
             self.bold_button,
             self.spacing,
             self.charspace,
@@ -2441,6 +2897,7 @@ class MangaPage(QWidget):
         ):
             widget.setEnabled(bool(r))
         if not r:
+            self.vertical_rtl.hide()
             self.source.clear()
             self.target.clear()
             self.font_mode_hint.setText("选择文字框后显示实际字号")
@@ -2478,6 +2935,10 @@ class MangaPage(QWidget):
         self.vertical_button.setChecked(s["vertical"])
         self.bold_button.setChecked(s["bold"])
         self.align.setCurrentIndex(self.align.findData(s["align"]))
+        self.vertical_rtl.blockSignals(True)
+        self.vertical_rtl.setVisible(bool(s["vertical"]))
+        self.vertical_rtl.setChecked(bool(s.get("vertical_rtl", True)))
+        self.vertical_rtl.blockSignals(False)
         self.autofit.blockSignals(True)
         self.fixed_size_button.blockSignals(True)
         self.autofit.setChecked(s["autofit"])
@@ -2810,6 +3271,7 @@ class MangaPage(QWidget):
                 "min_size": 10,
                 "autofit": True,
                 "vertical": False,
+                "vertical_rtl": True,
                 "bold": False,
                 "color": "#000000",
                 "stroke_color": "#ffffff",
@@ -3163,13 +3625,23 @@ class MangaPage(QWidget):
         region_ids=None,
         after=None,
         replace=None,
+        ocr_engine=None,
+        provider_id=None,
     ):
         if not self.document or self.job_id or self.submitting:
             return
         if not saved:
             self.save(
                 lambda: self.run(
-                    stage, True, preview, scope, region_ids, after, replace
+                    stage,
+                    True,
+                    preview,
+                    scope,
+                    region_ids,
+                    after,
+                    replace,
+                    ocr_engine,
+                    provider_id,
                 )
             )
             return
@@ -3232,18 +3704,17 @@ class MangaPage(QWidget):
             if self.dirty:
                 self.save_timer.start()
 
+        options = {
+            "replace_regions": replace,
+            "overwrite_source": replace,
+            "retranslate": replace,
+        }
+        if ocr_engine:
+            options["ocr_engine"] = ocr_engine
+        if provider_id:
+            options["provider_id"] = provider_id
         self.start_request(
-            lambda: self.client.run(
-                base,
-                stage,
-                pages,
-                regions,
-                {
-                    "replace_regions": replace,
-                    "overwrite_source": replace,
-                    "retranslate": replace,
-                },
-            ),
+            lambda: self.client.run(base, stage, pages, regions, options),
             completed,
         )
 

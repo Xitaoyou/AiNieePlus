@@ -42,6 +42,8 @@ class MangaOptions(RequestModel):
     replace_regions: bool = Field(default=False, strict=True)
     overwrite_source: bool = Field(default=False, strict=True)
     retranslate: bool = Field(default=False, strict=True)
+    ocr_engine: str | None = Field(default=None, max_length=64)
+    provider_id: str | None = Field(default=None, max_length=64)
 
 
 class MangaRun(RequestModel):
@@ -142,6 +144,11 @@ def create_manga_router(runtime, authorized, service=None):
             body.model_dump(exclude={"provider"}),
         )
         return {"models": catalogue}
+
+    @router.post("/model-apis/verify")
+    def verify_model_api(body: ModelApiConfig):
+        ok, message = service.models.verify_api(body.provider)
+        return {"ok": ok, "message": message, "models": service.models.catalogue()}
 
     @router.post("/models/{model_id}/verify")
     def verify_model(model_id: str):

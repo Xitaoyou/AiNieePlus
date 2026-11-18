@@ -316,13 +316,14 @@ class MangaService:
                             region.order = order
                         page.regions = regions
                     elif operation == "ocr":
-                        spec = self.models.spec(document.settings.ocr)
+                        engine_id = options.get("ocr_engine") or document.settings.ocr
+                        spec = self.models.spec(engine_id)
                         kind = spec.get("kind", "local")
                         backend = spec.get("backend")
                         folder = ""
                         api_config = {}
                         if kind == "local":
-                            folder = str(self.models.folder(document.settings.ocr))
+                            folder = str(self.models.folder(engine_id))
                         elif kind == "package":
                             if not self.models.package_available(backend):
                                 raise PipelineError(
@@ -360,7 +361,7 @@ class MangaService:
                                 operation="ocr",
                                 image_path=str(source),
                                 folder=folder,
-                                model_id=document.settings.ocr,
+                                model_id=engine_id,
                                 backend=backend,
                                 api_config=api_config,
                                 rect=[r.x, r.y, r.width, r.height],
@@ -536,8 +537,9 @@ class MangaService:
                 document.settings.target_language.lower()
             ),
         }
-        if document.settings.provider_id:
-            config["provider_id"] = document.settings.provider_id
+        provider_id = options.get("provider_id") or document.settings.provider_id
+        if provider_id:
+            config["provider_id"] = provider_id
         from dataclasses import replace
 
         original = {r.id: r.model_copy(deep=True) for r in selected}

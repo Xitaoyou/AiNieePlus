@@ -704,7 +704,7 @@ class ModelRegistry:
             if isinstance(v, str) and v.strip()
         }
         if cleaned:
-            apis[provider] = cleaned
+            apis[provider] = cleaned  # 改动配置即失效，需重新验证
         else:
             apis.pop(provider, None)
         path = self.api_config_path()
@@ -714,6 +714,79 @@ class ModelRegistry:
 
     def api_config(self, provider):
         return self.api_configs().get(provider or "", {})
+
+    def _probe_api(self, backend, config):
+        """用一次轻量请求验证云 OCR 配置是否可用。"""
+        import requests
+
+        key = config.get("api_key", "")
+        base = (config.get("base_url") or "").rstrip("/")
+        if backend == "api_openai":
+            url = (base or "https://api.openai.com/v1") + "/models"
+            response = requests.get(
+                url,
+                headers={"Authorization": "Bearer " + key} if key else {},
+                timeout=(10, 20),
+            )
+        elif backend == "api_gemini":
+            url = (
+                base or "https://generativelanguage.googleapis.com/v1beta"
+            ) + "/models"
+            response = requests.get(url, params={"key": key}, timeout=(10, 20))
+        else:
+            if not base:
+                raise PipelineError(
+                    "MODEL_API_ENDPOINT_REQUIRED",
+                    "该服务需要兼容网关：请填写接口地址后再验证",
+                    409,
+                )
+            response = requests.get(
+                base,
+                headers={"Authorization": "Bearer " + key} if key else {},
+                timeout=(10, 20),
+            )
+        if response.status_code in (200, 201, 204):
+            return True, ""
+        if response.status_code in (401, 403):
+            return False, f"鉴权失败（{response.status_code}），请检查 API Key"
+        if response.status_code == 404:
+            return False, "接口地址不存在（404），请检查接口地址"
+        return False, f"服务返回 {response.status_code}，请稍后重试或检查配置"
+
+    def verify_api(self, provider):
+        """验证并记录结果；catalogue 的 api_ready 取决于 verified。"""
+        config = self.api_config(provider)
+        if not config:
+            raise PipelineError(
+                "MODEL_API_NOT_CONFIGURED",
+                "该服务尚未配置 API：请先填写密钥或接口地址",
+                409,
+            )
+        spec = next(
+            (
+                s
+                for s in CATALOGUE
+                if s.get("kind") == "api" and s.get("api_provider") == provider
+            ),
+            None,
+        )
+        if spec is None:
+            raise PipelineError("MODEL_API_UNKNOWN", "未知的云 OCR 服务", 422)
+        try:
+            ok, message = self._probe_api(spec.get("backend"), config)
+        except PipelineError:
+            raise
+        except Exception as error:  # 网络异常不能冒泡为 500
+            ok, message = False, f"验证请求失败：{error}"
+        apis = self.api_configs()
+        entry = dict(apis.get(provider, {}))
+        entry["verified"] = ok
+        entry["verify_error"] = message
+        apis[provider] = entry
+        path = self.api_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json(path, apis)
+        return ok, message
 
     @staticmethod
     def package_available(backend):
@@ -742,7 +815,10 @@ class ModelRegistry:
             if kind == "api":
                 config = apis.get(spec.get("api_provider"), {})
                 row["installed"] = bool(config)
-                row["api_ready"] = bool(
+                row["api_ready"] = bool(config.get("verified"))
+                row["api_verified"] = bool(config.get("verified"))
+                row["api_error"] = config.get("verify_error") or ""
+                row["api_has_key"] = bool(
                     config.get("api_key") or config.get("base_url")
                 )
             elif kind == "system":
