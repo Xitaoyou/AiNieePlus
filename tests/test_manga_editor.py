@@ -601,7 +601,11 @@ def test_menus_reading_panel_compact_pages_and_zoom():
     editor.page_panel.setFixedWidth(64)
     editor.update_page_labels()
     assert editor.pages.item(0).text() == "1" and editor.page_bar_widget.isHidden()
-    assert editor.pages.item(0).toolTip() == "page0.png"
+    assert editor.pages.item(0).toolTip().startswith("page0.png")
+    editor.page_panel.setFixedWidth(240)
+    editor.update_page_labels()
+    assert "1 · page0" in editor.pages.item(0).text()
+    assert "(" not in editor.pages.item(0).text(), "宽栏也不再用括号挤框数"
     editor.canvas.setSceneRect(0, 0, 640, 800)
     editor.fit_canvas()
     editor.zoom_slider.setValue(100)

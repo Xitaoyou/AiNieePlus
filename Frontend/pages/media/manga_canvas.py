@@ -299,10 +299,18 @@ class MangaCanvas(QGraphicsView):
             (i for i in self.items(event.pos()) if isinstance(i, RegionItem)), None
         )
         if item is not None:
+            region_id = item.region["id"]
             if not item.isSelected():
                 self.scene().clearSelection()
                 item.setSelected(True)
-            self.contextRequested.emit(item.region["id"], event.globalPos())
+            position = event.globalPos()
+            # 延后到事件循环：菜单构建可能触发场景重建，不能在 view 事件栈内
+            QTimer.singleShot(
+                0,
+                lambda rid=region_id, pos=position: self.contextRequested.emit(
+                    rid, pos
+                ),
+            )
             event.accept()
             return
         super().contextMenuEvent(event)

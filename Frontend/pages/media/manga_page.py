@@ -20,6 +20,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import (
     QColor,
+    QCursor,
     QDesktopServices,
     QKeySequence,
     QPalette,
@@ -658,22 +659,6 @@ class MangaPage(QWidget):
         self.geometry_lock.toggled.connect(
             lambda v: self.region_value("geometry_locked", v)
         )
-        self.source_lock_button = TransparentToolButton(FluentIcon.PIN, self)
-        self.source_lock_button.setCheckable(True)
-        self.source_lock_button.setFixedSize(28, 28)
-        self.source_lock_button.setToolTip("锁定原文（批量识别/OCR 跳过此框）")
-        self.source_lock_button.toggled.connect(self.source_lock.setChecked)
-        self.source_lock.toggled.connect(
-            lambda v: self.source_lock_button.setChecked(v)
-        )
-        self.target_lock_button = TransparentToolButton(FluentIcon.PIN, self)
-        self.target_lock_button.setCheckable(True)
-        self.target_lock_button.setFixedSize(28, 28)
-        self.target_lock_button.setToolTip("锁定译文（批量翻译跳过此框）")
-        self.target_lock_button.toggled.connect(self.target_lock.setChecked)
-        self.target_lock.toggled.connect(
-            lambda v: self.target_lock_button.setChecked(v)
-        )
         self.font = QComboBox()
         self.font.addItem("内置字体", "")
         self.font.currentIndexChanged.connect(
@@ -764,7 +749,8 @@ class MangaPage(QWidget):
         self.regions.setColumnCount(2)
         self.regions.setHorizontalHeaderLabels(["序号", "内容"])
         self.regions.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.regions.setMinimumHeight(150)
+        self.regions.setMinimumHeight(110)
+        self.regions.setMaximumHeight(260)
         self.regions.setWordWrap(True)
         self.regions.setSelectionBehavior(QTableWidget.SelectRows)
         self.regions.setColumnWidth(0, 48)
@@ -857,7 +843,7 @@ class MangaPage(QWidget):
                 ("应用到本页已有框", lambda: self.apply_style(False)),
                 ("应用到整部已有框", lambda: self.apply_style(True)),
                 ("添加字体文件…", self.pick_font),
-                ("重新生成当前页精准去字底图", lambda: self.run("clean", scope=0)),
+                ("重新生成当前页精准去字底图", self.regenerate_clean_background),
             ],
         )
         self.menu_button(
@@ -936,6 +922,7 @@ class MangaPage(QWidget):
         left_layout.addWidget(self.page_title)
         self.pages = QListWidget()
         self.pages.setMinimumWidth(0)
+        self.pages.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.pages.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         left_layout.addWidget(self.pages)
         self.page_bar_widget = QWidget()
@@ -1069,16 +1056,8 @@ class MangaPage(QWidget):
         text_header.addWidget(StrongBodyLabel("文字", right_card))
         text_header.addStretch(1)
         form.addRow(text_header)
-        source_row = QHBoxLayout()
-        source_row.setSpacing(4)
-        source_row.addWidget(self.source, 1)
-        source_row.addWidget(self.source_lock_button)
-        form.addRow("原文", source_row)
-        target_row = QHBoxLayout()
-        target_row.setSpacing(4)
-        target_row.addWidget(self.target, 1)
-        target_row.addWidget(self.target_lock_button)
-        form.addRow("译文", target_row)
+        form.addRow("原文", self.source)
+        form.addRow("译文", self.target)
         # ==== 排版 ====
         typography_header = QHBoxLayout()
         typography_header.addWidget(StrongBodyLabel("排版", right_card))
@@ -1477,12 +1456,14 @@ class MangaPage(QWidget):
         self.page_bar_widget.setVisible(not compact)
         for i, page in enumerate(self.document["pages"]):
             if i < self.pages.count():
+                name = page["name"]
+                stem = name.rsplit(".", 1)[0]
                 self.pages.item(i).setText(
-                    str(i + 1)
-                    if compact
-                    else f"{i + 1}. {page['name']} ({len(page['regions'])}框)"
+                    str(i + 1) if compact else f"{i + 1} · {stem}"
                 )
-                self.pages.item(i).setToolTip(page["name"])
+                self.pages.item(i).setToolTip(
+                    f"{name} · {len(page['regions'])} 个文字框"
+                )
 
     def fit_canvas(self):
         self.canvas.fitInView(self.canvas.sceneRect(), Qt.KeepAspectRatio)
@@ -1585,6 +1566,30 @@ class MangaPage(QWidget):
             self.position_zoom_controls()
             if hasattr(self, "progress_panel") and not self.progress_panel.isHidden():
                 self.position_progress_panel()
+        if (
+            hasattr(self, "canvas")
+            and watched is self.canvas.viewport()
+            and event.type() == QEvent.ContextMenu
+        ):
+            point = event.pos()
+            item = next(
+                (
+                    i
+                    for i in self.canvas.items(point)
+                    if type(i).__name__ == "RegionItem"
+                ),
+                None,
+            )
+            if item is not None:
+                region_id = item.region["id"]
+                item.setSelected(True)
+                QTimer.singleShot(
+                    0,
+                    lambda rid=region_id, pos=QCursor.pos(): self.region_context_menu(
+                        rid, pos
+                    ),
+                )
+                return True
         if watched in (getattr(self, "source", None), getattr(self, "target", None)):
             if event.type() == QEvent.ShortcutOverride and (
                 event.matches(QKeySequence.Undo) or event.matches(QKeySequence.Redo)
@@ -1622,7 +1627,11 @@ class MangaPage(QWidget):
         return button
 
     def region_context_menu(self, region_id, position):
-        self.select_region(region_id)
+        if not any(
+            r["id"] == region_id
+            for r in (self.page() or {}).get("regions", [])
+        ):
+            return
         menu = RoundMenu(parent=self.canvas)
         for icon, title, callback in [
             (FluentIcon.BROOM, "去除框内原文（可撤销）", self.erase_region),
@@ -1651,14 +1660,6 @@ class MangaPage(QWidget):
                 FluentIcon.FONT_SIZE,
                 "自动适应框大小",
                 lambda: self.style_value("autofit", True),
-            ),
-            (
-                FluentIcon.CHECKBOX,
-                "锁定 / 解锁文字框",
-                lambda: self.region_value(
-                    "geometry_locked",
-                    not (self.region() or {}).get("geometry_locked", False),
-                ),
             ),
             (
                 FluentIcon.DELETE,
@@ -2182,8 +2183,6 @@ class MangaPage(QWidget):
             self.source_lock,
             self.target_lock,
             self.geometry_lock,
-            self.source_lock_button,
-            self.target_lock_button,
         ):
             widget.setEnabled(bool(r))
         if not r:
@@ -2456,8 +2455,10 @@ class MangaPage(QWidget):
         )
         if old_page != self.page_id:
             self.image_data = None
+            self.canvas.blockSignals(True)
             self.canvas.scene().clear()
-            self.load_image()
+            self.canvas.blockSignals(False)
+            QTimer.singleShot(0, self.load_image)
 
     def set_setting(self, key, value):
         self.edit(
@@ -2682,14 +2683,46 @@ class MangaPage(QWidget):
             self.edit("调整页面顺序", action)
 
     def delete_page(self):
-        if self.page():
+        """删除选中页（支持 Shift/Ctrl 多选），防重入合并连续点击。"""
+        if not self.document or not self.document["pages"]:
+            return
+        rows = sorted({index.row() for index in self.pages.selectedIndexes()})
+        if not rows:
+            rows = [self.pages.currentRow()]
+        ids = [
+            self.document["pages"][row]["id"]
+            for row in rows
+            if 0 <= row < len(self.document["pages"])
+        ]
+        if not ids:
+            return
+        if getattr(self, "_deleting_pages", False):
+            self._delete_again = True
+            return
+        self._deleting_pages = True
+        try:
+            ids = set(ids)
             self.edit(
                 "移除页面",
-                lambda: self.document.__setitem__(
+                lambda pending=ids: self.document.__setitem__(
                     "pages",
-                    [p for p in self.document["pages"] if p["id"] != self.page_id],
+                    [p for p in self.document["pages"] if p["id"] not in pending],
                 ),
             )
+            if not self.document["pages"]:
+                self.page_id = None
+                self.image_data = None
+                self.selected = None
+                self.canvas.blockSignals(True)
+                self.canvas.scene().clear()
+                self.canvas.blockSignals(False)
+                self.refresh_regions()
+                self.status.setText("已删除全部页面，可继续导入新页面")
+        finally:
+            self._deleting_pages = False
+        if getattr(self, "_delete_again", False):
+            self._delete_again = False
+            QTimer.singleShot(0, self.delete_page)
 
     def set_default_style(self):
         """把当前选中框的样式设为新框默认；已有框保持不变。"""
@@ -3319,7 +3352,16 @@ class MangaPage(QWidget):
         if self.variant.currentData() in {"edit", "render", "clean"}:
             self.variant.setCurrentIndex(self.variant.findData("edit"))
             self.load_image()
-        self.status.setText("已启用精准去字" if checked else "已切回色块遮挡")
+        if checked:
+            self.status.setText(
+                "已启用精准去字：正在生成去字底图，期间显示色块遮挡，可继续编辑或切页"
+            )
+            signature = self.background_signature()
+            if signature not in self.clean_cache:
+                self.preview_pending = True
+                self.save_timer.start()
+        else:
+            self.status.setText("已切回色块遮挡")
 
     def resume_follow(self):
         self.follow_progress = True
@@ -3376,6 +3418,15 @@ class MangaPage(QWidget):
         self.syncing = False
         self.preview_pending = False
         self.save_callbacks = []
+
+    def regenerate_clean_background(self):
+        """重新生成当前页精准去字底图（精准去字的重试入口）。"""
+        if not self.document:
+            return
+        if self.document["settings"].get("removal") != "precise":
+            self.precise.setChecked(True)
+        self.status.setText("正在重新生成当前页去字底图…")
+        self.run("clean", scope=0)
 
     def delete_workspace(self, workspace_id, title):
         if (
