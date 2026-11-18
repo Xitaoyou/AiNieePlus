@@ -1,8 +1,8 @@
 """Prepare redistributable public manga assets before building the full installer.
 
-Usage: python -m Tools.prepare_manga_models --source /path/to/ImageTrans --download
+Usage: python -m Tools.prepare_manga_models --source /path/to/model-folder --download
 No Java binaries are read or copied. The Scaled YOLOv4 legacy detector is bundled
-from its public ObjectDetector release; private ImageTrans weights stay out.
+from its public release; private third-party weights stay out.
 """
 
 import argparse
@@ -46,7 +46,7 @@ def check(root=ROOT):
                     or error.code not in {"MODEL_CORRUPT", "MODEL_UNPINNED"}
                 ):
                     raise
-                # 本地可能保留 ImageTrans 自带的私有旧版权重；它不参与云端
+                # 本地可能保留用户自备的私有旧版权重；它不参与云端
                 # 发布校验（source-lock 锁的是公开下载版），本地构建照常使用。
                 folder = registry.folder(spec["id"])
                 registry.validate_layout(spec["id"], folder)

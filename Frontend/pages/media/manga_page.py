@@ -379,11 +379,13 @@ class ModelDialog(QDialog):
         qconfig.themeChanged.connect(self.apply_theme)
         self.page = page
         self.setWindowTitle("漫画模型中心")
-        self.resize(1120, 620)
+        self.resize(1180, 700)
+        self.setMinimumSize(980, 560)
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
         self.intro = QLabel(
-            "检测模型与本地 OCR 按需下载；云 API OCR 选择后在「配置 API」填密钥。"
-            "悬停任意模型可查看功能说明。"
+            "检测模型与本地 OCR 按需下载；云 API OCR 需在「配置 API」填密钥并验证。"
+            "悬停任意行可查看完整说明。"
         )
         self.intro.setWordWrap(True)
         layout.addWidget(self.intro)
@@ -394,13 +396,29 @@ class ModelDialog(QDialog):
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 230)
-        self.table.setColumnWidth(1, 90)
-        self.table.setColumnWidth(2, 150)
-        self.table.setColumnWidth(3, 70)
-        self.table.setColumnWidth(4, 360)
-        self.table.setColumnWidth(6, 96)
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideRight)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setFixedHeight(34)
+        # 说明列自适应剩余宽度，其余列固定，避免横向滚动与挤压
+        for column, mode, width in (
+            (0, QHeaderView.Interactive, 240),   # 模型
+            (1, QHeaderView.Fixed, 120),         # 类型
+            (2, QHeaderView.Fixed, 170),         # 状态
+            (3, QHeaderView.Fixed, 70),          # 大小
+            (4, QHeaderView.Stretch, 0),         # 功能说明
+            (5, QHeaderView.Interactive, 130),   # 来源许可
+            (6, QHeaderView.Fixed, 100),         # 操作
+        ):
+            header.setSectionResizeMode(column, mode)
+            if width:
+                self.table.setColumnWidth(column, width)
+        self.table.verticalHeader().setDefaultSectionSize(38)
         layout.addWidget(self.table, 1)
         bar = QHBoxLayout()
         layout.addLayout(bar)
@@ -588,9 +606,16 @@ class ModelDialog(QDialog):
                 font.setBold(True)
                 cell.setFont(font)
                 cell.setFlags(Qt.ItemIsEnabled)
-                cell.setBackground(QColor(0, 0, 0, 12))
+                shade = (
+                    QColor(255, 255, 255, 18)
+                    if isDarkTheme()
+                    else QColor(0, 0, 0, 12)
+                )
+                cell.setBackground(shade)
                 self.table.setItem(row, 0, cell)
-                self.table.setSpan(row, 0, row, self.table.columnCount())
+                # 行跨度必须是 1，否则第 N 个分组会吞掉后面 N 行模型
+                self.table.setSpan(row, 0, 1, self.table.columnCount())
+                self.table.setRowHeight(row, 30)
                 continue
             self.row_models[row] = model
             kind = model.get("kind", "local")
@@ -631,17 +656,20 @@ class ModelDialog(QDialog):
                         cell.setBackground(QColor(231, 72, 86, 24))
             text, callback = self.action_for(model)
             button = QPushButton(text)
-            button.setMinimumHeight(26)
+            button.setFixedHeight(26)
+            button.setMinimumWidth(86)
             if callback is None:
                 button.setEnabled(False)
             else:
                 button.clicked.connect(
                     lambda checked=False, action=callback, target=model: action(target)
                 )
-            self.table.setCellWidget(row, 6, button)
-        self.table.resizeColumnsToContents()
-        self.table.setColumnWidth(4, 360)
-        self.table.setColumnWidth(6, 96)
+            holder = QWidget(self.table)
+            holder_layout = QHBoxLayout(holder)
+            holder_layout.setContentsMargins(6, 0, 6, 0)
+            holder_layout.addWidget(button)
+            self.table.setCellWidget(row, 6, holder)
+            self.table.setRowHeight(row, 38)
         pending = [
             m
             for m in models
@@ -705,7 +733,7 @@ class ModelDialog(QDialog):
         if not model:
             return
         folder = QFileDialog.getExistingDirectory(
-            self, "选择模型目录或 ImageTrans 文件夹"
+            self, "选择模型目录"
         )
         if folder:
             self.page.start_request(
@@ -1028,6 +1056,7 @@ class MangaPage(QWidget):
         self.detector.currentIndexChanged.connect(
             lambda: self.set_setting("detector", self.detector.currentData())
         )
+        self.detector.currentIndexChanged.connect(self.apply_detector_defaults)
         self.ocr.currentIndexChanged.connect(
             lambda: self.set_setting("ocr", self.ocr.currentData())
         )
@@ -2558,6 +2587,32 @@ class MangaPage(QWidget):
             return
         self.model_catalogue = models
         self.fill_model_choices()
+
+    def apply_detector_defaults(self):
+        """切换检测模型时套用模型建议阈值（旧版权重置信度偏低）。"""
+        if self.loading_form or not hasattr(self, "confidence"):
+            return
+        model_id = self.detector.currentData()
+        model = next(
+            (m for m in (self.model_catalogue or []) if m.get("id") == model_id),
+            None,
+        )
+        if not model:
+            return
+        value = model.get("default_confidence")
+        if not isinstance(value, (int, float)):
+            return
+        if abs(self.confidence.value() - float(value)) < 1e-6:
+            return
+        self.confidence.blockSignals(True)
+        self.confidence.setValue(float(value))
+        self.confidence.blockSignals(False)
+        if self.document:
+            self.set_setting("confidence", float(value))
+            self.status.setText(
+                f"已切换到「{model['name']}」，检测阈值自动设为 {value}；"
+                "若检出过少可继续调低"
+            )
 
     def fill_model_choices(self):
         catalogue = getattr(self, "model_catalogue", None) or []

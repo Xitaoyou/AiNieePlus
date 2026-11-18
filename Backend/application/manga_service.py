@@ -239,6 +239,18 @@ class MangaService:
                             model_id=document.settings.detector,
                             confidence=document.settings.confidence,
                         )
+                        if not results:
+                            report["warnings"].append(
+                                {
+                                    "page_id": page.id,
+                                    "message": (
+                                        "本页未检出文字框：可尝试降低检测阈值、"
+                                        "更换检测模型（如 Legacy 旧版权重建议 0.25），"
+                                        "或确认该页确实包含对白气泡"
+                                    ),
+                                }
+                            )
+                            continue
                         page.panels = (
                             [
                                 {

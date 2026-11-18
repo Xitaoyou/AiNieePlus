@@ -1,4 +1,4 @@
-"""Native CPU detection and recognition; no ImageTrans or Java process."""
+"""Native CPU detection and recognition; runs inside this process."""
 
 import re
 from functools import lru_cache
@@ -213,7 +213,7 @@ def detect(image, folder, model_id, confidence=0.5):
         size_h = int(params.get("height", 640) or 640)
     except (OSError, ValueError):
         pass
-    # Match ImageTrans YOLO: letterbox, RGB float CHW, end-to-end detections.
+    # YOLO letterbox preprocessing: RGB float CHW, end-to-end detections.
     scale = min(size_w / width, size_h / height)
     w, h = round(width * scale), round(height * scale)
     left, top = (size_w - w) // 2, (size_h - h) // 2
@@ -389,7 +389,7 @@ def _ocr_custom(image, config):
     )
 
 
-_BAIDU_TOKENS = {}  # appid -> (token, expire_at)，与 ImageTrans 的 token 缓存一致
+_BAIDU_TOKENS = {}  # appid -> (token, expire_at)，进程内缓存避免重复换 token
 
 
 def _baidu_token(config):
@@ -758,7 +758,7 @@ def _ocr_azure(image, config):
     response.raise_for_status()
     body = response.json() or {}
     lines = []
-    # ImageTrans 同款：v2.0 同步接口返回 regions[].lines[].text
+    # Azure v2.0 同步接口返回 regions[].lines[].words[].text
     for region in body.get("regions") or []:
         for line in region.get("lines") or []:
             words = " ".join(
@@ -827,7 +827,7 @@ def _ocr_tesseract(image, config):
 
 
 def _ocr_mit48px(image, folder, config):
-    """MIT48px CTC 行识别；模型与字符表需从 ImageTrans 的 mit 目录导入。"""
+    """MIT48px CTC 行识别；需要导入模型与字符表目录。"""
     import onnxruntime as ort
 
     model_path = Path(folder) / "ocr_ctc_fp16.onnx"
@@ -835,7 +835,7 @@ def _ocr_mit48px(image, folder, config):
     if not model_path.is_file() or not alphabet_path.is_file():
         raise PipelineError(
             "MODEL_IMPORT_REQUIRED",
-            "请先从 ImageTrans 的 mit 目录导入 ocr_ctc_fp16.onnx 与 alphabet-all-v5.txt",
+            "请先导入 ocr_ctc_fp16.onnx 与 alphabet-all-v5.txt 所在目录",
             409,
         )
     try:
@@ -888,7 +888,7 @@ def _ocr_baidu(image, config):
     buffer = BytesIO()
     image.convert("RGB").save(buffer, "PNG")
     data = base64.b64encode(buffer.getvalue()).decode()
-    # 与 ImageTrans 一致的模式映射：accurate / accurateWithLocation /
+    # 模式映射：accurate / accurateWithLocation /
     # general / withLocation / network(webimage)
     endpoint = {
         "accurate": "/rest/2.0/ocr/v1/accurate_basic",

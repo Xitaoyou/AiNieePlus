@@ -5,19 +5,19 @@
   "models": [
     {
       "id": "manga-panel",
-      "source": "https://github.com/xulihang/balloon-dataset",
+      "source": "公开漫画检测权重仓库",
       "url": "https://github.com/xulihang/balloon-dataset/releases/download/models/manga-panel.zip",
       "license": "AGPL-3.0"
     },
     {
       "id": "legacy-balloon-yolov4",
-      "source": "https://github.com/xulihang/ObjectDetector",
+      "source": "公开检测权重仓库",
       "url": "https://github.com/xulihang/ObjectDetector/releases/download/models/yolo_darknet.zip",
-      "license": "见 ObjectDetector 仓库说明"
+      "license": "见权重说明"
     },
     {
       "id": "mangaocr",
-      "source": "https://github.com/xulihang/mangaocr-onnx",
+      "source": "公开 OCR 权重仓库",
       "url": "https://github.com/xulihang/mangaocr-onnx/releases/download/models/",
       "license": "Apache-2.0"
     },
