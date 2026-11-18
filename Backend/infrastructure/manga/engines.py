@@ -389,6 +389,67 @@ def _ocr_custom(image, config):
     )
 
 
+def _baidu_token(config):
+    import requests
+
+    response = requests.get(
+        (config.get("base_url") or "https://aip.baidubce.com").rstrip("/")
+        + "/oauth/2.0/token",
+        params={
+            "grant_type": "client_credentials",
+            "client_id": config.get("appid", ""),
+            "client_secret": config.get("api_key", ""),
+        },
+        timeout=(10, 20),
+    )
+    response.raise_for_status()
+    token = (response.json() or {}).get("access_token")
+    if not token:
+        raise PipelineError(
+            "MODEL_API_AUTH",
+            "百度 OCR 换取 access_token 失败，请检查 AppID 与 API Key",
+            409,
+        )
+    return token
+
+
+def _ocr_baidu(image, config):
+    import base64
+    from io import BytesIO
+
+    import requests
+
+    if not config.get("appid") or not config.get("api_key"):
+        raise PipelineError(
+            "MODEL_API_NOT_CONFIGURED",
+            "百度 OCR 需要 AppID 与 API Key：请在模型中心填写后再用",
+            409,
+        )
+    token = _baidu_token(config)
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, "PNG")
+    data = base64.b64encode(buffer.getvalue()).decode()
+    response = requests.post(
+        (config.get("base_url") or "https://aip.baidubce.com").rstrip("/")
+        + "/rest/2.0/ocr/v1/accurate_basic",
+        params={"access_token": token},
+        data={"image": data, "detect_direction": "true"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=(10, 60),
+    )
+    response.raise_for_status()
+    payload = response.json() or {}
+    if payload.get("error_code"):
+        raise PipelineError(
+            "MODEL_API_ERROR",
+            f"百度 OCR 返回错误 {payload.get('error_code')}："
+            + str(payload.get("error_msg", "")),
+            409,
+        )
+    results = payload.get("words_result") or []
+    return "\n".join(str(item.get("words", "")) for item in results).strip()
+
+
 def _ocr_winrt(image):
     try:
         import asyncio
@@ -435,7 +496,7 @@ def recognize(
 ):
     backend = backend or engine_id
     api_config = api_config or {}
-    if backend in {"api_openai", "api_gemini", "api_custom"}:
+    if backend in {"api_openai", "api_gemini", "api_baidu", "api_custom"}:
         if not api_config:
             raise PipelineError(
                 "MODEL_API_NOT_CONFIGURED",
@@ -446,6 +507,8 @@ def recognize(
             return _ocr_openai(image, api_config)
         if backend == "api_gemini":
             return _ocr_gemini(image, api_config)
+        if backend == "api_baidu":
+            return _ocr_baidu(image, api_config)
         return _ocr_custom(image, api_config)
     if backend == "winrt":
         return _ocr_winrt(image)

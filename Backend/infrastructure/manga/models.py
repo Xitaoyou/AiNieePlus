@@ -405,7 +405,7 @@ CATALOGUE = [
         name="百度 OCR",
         role="ocr",
         kind="api",
-        backend="api_custom",
+        backend="api_baidu",
         core=False,
         advanced=False,
         requires_api=True,
@@ -416,7 +416,7 @@ CATALOGUE = [
         size_mb=0,
         url="",
         source="https://cloud.baidu.com/product/ocr",
-        advice="百度通用文字识别；需 API Key/Secret，签名协议由兼容网关接入",
+        advice="百度通用文字识别（accurate_basic）；需 AppID 与 API Key，自动换取 access_token",
     ),
     dict(
         id="api-tencent",
@@ -733,6 +733,24 @@ class ModelRegistry:
                 base or "https://generativelanguage.googleapis.com/v1beta"
             ) + "/models"
             response = requests.get(url, params={"key": key}, timeout=(10, 20))
+        elif backend == "api_baidu":
+            appid = config.get("appid", "")
+            if not appid or not key:
+                return False, "百度 OCR 需要同时填写 AppID 与 API Key"
+            response = requests.get(
+                base or "https://aip.baidubce.com/oauth/2.0/token",
+                params={
+                    "grant_type": "client_credentials",
+                    "client_id": appid,
+                    "client_secret": key,
+                },
+                timeout=(10, 20),
+            )
+            if response.status_code == 200 and "access_token" in (
+                response.json() or {}
+            ):
+                return True, ""
+            return False, "AppID 或 API Key 无效（换取 access_token 失败）"
         else:
             if not base:
                 raise PipelineError(

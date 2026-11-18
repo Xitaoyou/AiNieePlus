@@ -276,13 +276,16 @@ class ApiConfigDialog(QDialog):
             )
         )
         form = QFormLayout()
+        self.appid = QLineEdit()
+        self.appid.setPlaceholderText("百度填 AppID；腾讯填 SecretId；其他可留空")
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.Password)
-        self.api_key.setPlaceholderText("sk-…")
+        self.api_key.setPlaceholderText("sk-… / 百度 API Key / SecretKey")
         self.base_url = QLineEdit()
         self.base_url.setPlaceholderText("留空使用官方地址；也可填兼容网关")
         self.model_name = QLineEdit()
         self.model_name.setPlaceholderText("如 gpt-4o-mini / gemini-2.0-flash")
+        form.addRow("AppID", self.appid)
         form.addRow("API Key", self.api_key)
         form.addRow("接口地址", self.base_url)
         form.addRow("模型名", self.model_name)
@@ -304,6 +307,7 @@ class ApiConfigDialog(QDialog):
     def load_current(self):
         def loaded(data):
             config = (data.get("configs") or {}).get(self.provider, {})
+            self.appid.setText(config.get("appid", ""))
             self.api_key.setText(config.get("api_key", ""))
             self.base_url.setText(config.get("base_url", ""))
             self.model_name.setText(config.get("model", ""))
@@ -315,6 +319,7 @@ class ApiConfigDialog(QDialog):
     def save_from_form(self):
         self.save(
             {
+                "appid": self.appid.text().strip(),
                 "api_key": self.api_key.text().strip(),
                 "base_url": self.base_url.text().strip(),
                 "model": self.model_name.text().strip(),
