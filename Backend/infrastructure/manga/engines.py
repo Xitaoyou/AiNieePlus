@@ -668,6 +668,216 @@ def _ocr_ocrspace(image, config):
     ).strip()
 
 
+def _ocr_youdao(image, config):
+    import base64
+    import hashlib
+    import time
+    from io import BytesIO
+    from uuid import uuid4
+
+    import requests
+
+    appid = config.get("appid", "")
+    secret = config.get("api_key", "")
+    if not appid or not secret:
+        raise PipelineError(
+            "MODEL_API_NOT_CONFIGURED",
+            "有道 OCR 需要应用 ID 与应用密钥：请在模型中心填写",
+            409,
+        )
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, "PNG")
+    payload = base64.b64encode(buffer.getvalue()).decode()
+    salt = uuid4().hex
+    sign = hashlib.sha256((appid + payload + salt + secret).encode()).hexdigest()
+    response = requests.post(
+        (config.get("base_url") or "https://openapi.youdao.com").rstrip("/")
+        + "/ocr_api",
+        data={
+            "q": payload,
+            "appKey": appid,
+            "salt": salt,
+            "sign": sign,
+            "signType": "v3",
+            "docType": "json",
+            "languageType": config.get("model") or "ja",
+            "detectType": "10011",
+            "imageType": "1",
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=(10, 60),
+    )
+    response.raise_for_status()
+    body = response.json() or {}
+    if str(body.get("errorCode", "0")) != "0":
+        raise PipelineError(
+            "MODEL_API_ERROR",
+            f"有道 OCR 返回错误 {body.get('errorCode')}",
+            409,
+        )
+    result = body.get("Result") or {}
+    lines = []
+    for region in result.get("regions") or []:
+        for line in region.get("lines") or []:
+            if isinstance(line, dict) and line.get("text"):
+                lines.append(str(line["text"]))
+    if not lines and isinstance(result.get("text"), str):
+        lines.append(result["text"])
+    return "\n".join(lines).strip()
+
+
+def _ocr_azure(image, config):
+    import time
+    from io import BytesIO
+
+    import requests
+
+    endpoint = (config.get("base_url") or "").rstrip("/")
+    key = config.get("api_key", "")
+    if not endpoint or not key:
+        raise PipelineError(
+            "MODEL_API_NOT_CONFIGURED",
+            "Azure OCR 需要 Endpoint 与 Key：请在模型中心填写",
+            409,
+        )
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, "PNG")
+    submit = requests.post(
+        endpoint + "/vision/v3.2/read/analyze",
+        headers={
+            "Ocp-Apim-Subscription-Key": key,
+            "Content-Type": "application/octet-stream",
+        },
+        data=buffer.getvalue(),
+        timeout=(10, 60),
+    )
+    submit.raise_for_status()
+    location = submit.headers.get("Operation-Location")
+    if not location:
+        raise PipelineError(
+            "MODEL_API_ERROR", "Azure 未返回 Operation-Location", 409
+        )
+    for _ in range(20):
+        time.sleep(1)
+        poll = requests.get(
+            location, headers={"Ocp-Apim-Subscription-Key": key}, timeout=(10, 30)
+        )
+        poll.raise_for_status()
+        body = poll.json() or {}
+        status = str(body.get("status", "")).lower()
+        if status == "succeeded":
+            lines = []
+            for page in (body.get("analyzeResult") or {}).get("readResults") or []:
+                for line in page.get("lines") or []:
+                    if line.get("text"):
+                        lines.append(str(line["text"]))
+            return "\n".join(lines).strip()
+        if status == "failed":
+            raise PipelineError("MODEL_API_ERROR", "Azure OCR 识别失败", 409)
+    raise PipelineError("MODEL_API_TIMEOUT", "Azure OCR 轮询超时", 409)
+
+
+def _ocr_ollama(image, config):
+    import base64
+    from io import BytesIO
+
+    import requests
+
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, "PNG")
+    payload = base64.b64encode(buffer.getvalue()).decode()
+    response = requests.post(
+        (config.get("base_url") or "http://127.0.0.1:11434").rstrip("/")
+        + "/api/generate",
+        json={
+            "model": config.get("model") or "llava",
+            "prompt": "只输出图片中的文字，不要解释，不要加标点解释。",
+            "images": [payload],
+            "stream": False,
+        },
+        timeout=(10, 180),
+    )
+    response.raise_for_status()
+    return str((response.json() or {}).get("response", "")).strip()
+
+
+def _ocr_tesseract(image, config):
+    import shutil
+    import subprocess
+    from io import BytesIO
+
+    exe = config.get("base_url") or shutil.which("tesseract") or "tesseract"
+    language = config.get("model") or "jpn"
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, "PNG")
+    try:
+        result = subprocess.run(
+            [exe, "stdin", "stdout", "-l", language, "--psm", "6"],
+            input=buffer.getvalue(),
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise PipelineError(
+            "MODEL_DEPENDENCY_MISSING",
+            f"未找到可用的 tesseract（{exe}）：请安装并把路径填入接口地址",
+            409,
+        ) from error
+    if result.returncode != 0:
+        raise PipelineError(
+            "MODEL_API_ERROR",
+            "tesseract 执行失败：" + result.stderr.decode("utf-8", "replace")[:160],
+            409,
+        )
+    return result.stdout.decode("utf-8", "replace").strip()
+
+
+def _ocr_mit48px(image, folder, config):
+    """MIT48px CTC 行识别；模型与字符表需从 ImageTrans 的 mit 目录导入。"""
+    import onnxruntime as ort
+
+    model_path = Path(folder) / "ocr_ctc_fp16.onnx"
+    alphabet_path = Path(folder) / "alphabet-all-v5.txt"
+    if not model_path.is_file() or not alphabet_path.is_file():
+        raise PipelineError(
+            "MODEL_IMPORT_REQUIRED",
+            "请先从 ImageTrans 的 mit 目录导入 ocr_ctc_fp16.onnx 与 alphabet-all-v5.txt",
+            409,
+        )
+    try:
+        session_ = ort.InferenceSession(str(model_path))
+    except Exception as error:
+        raise PipelineError(
+            "MODEL_UNSUPPORTED",
+            "该 CTC 权重与当前 onnxruntime 版本不兼容，请更换推理环境",
+            422,
+        ) from error
+    alphabet = alphabet_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    gray = image.convert("L")
+    height = 48
+    width = max(8, round(gray.width * height / max(1, gray.height)))
+    resized = gray.resize((width, height))
+    tensor = (np.asarray(resized, dtype=np.float32) / 255.0)[None, None]
+    try:
+        logits = np.asarray(
+            session_.run(None, {session_.get_inputs()[0].name: tensor})[0]
+        )
+    except Exception as error:
+        raise PipelineError("MODEL_OUTPUT_MISMATCH", str(error), 422) from error
+    logits = logits.reshape(-1, logits.shape[-1])
+    indices = logits.argmax(axis=1)
+    chars, last = [], None
+    for index in indices:
+        index = int(index)
+        if index == last or index == 0:
+            last = index
+            continue
+        last = index
+        if index < len(alphabet):
+            chars.append(alphabet[index])
+    return "".join(chars).strip()
+
+
 def _ocr_baidu(image, config):
     import base64
     from io import BytesIO
@@ -751,6 +961,10 @@ def recognize(
 ):
     backend = backend or engine_id
     api_config = api_config or {}
+    if backend == "mit48px":
+        return _ocr_mit48px(image, folder, api_config or {})
+    if backend == "tesseract":
+        return _ocr_tesseract(image, api_config or {})
     if backend in {
         "api_openai",
         "api_gemini",
@@ -760,6 +974,9 @@ def recognize(
         "api_abbyy",
         "api_google",
         "api_ocrspace",
+        "api_youdao",
+        "api_azure",
+        "api_ollama",
         "api_custom",
     }:
         if not api_config:
@@ -784,6 +1001,12 @@ def recognize(
             return _ocr_google(image, api_config)
         if backend == "api_ocrspace":
             return _ocr_ocrspace(image, api_config)
+        if backend == "api_youdao":
+            return _ocr_youdao(image, api_config)
+        if backend == "api_azure":
+            return _ocr_azure(image, api_config)
+        if backend == "api_ollama":
+            return _ocr_ollama(image, api_config)
         return _ocr_custom(image, api_config)
     if backend == "winrt":
         return _ocr_winrt(image)

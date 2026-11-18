@@ -365,6 +365,153 @@ CATALOGUE = [
         advice="Google Gemini 视觉识字；适合多语言混排与手写体",
     ),
     dict(
+        id="youdao-ocr",
+        name="有道智云 OCR",
+        role="ocr",
+        kind="api",
+        backend="api_youdao",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="youdao",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://ai.youdao.com",
+        advice="有道智云通用文字识别（ocr_api，v3 签名）；需应用 ID 与应用密钥，ImageTrans 内置同款",
+    ),
+    dict(
+        id="azure-ocr",
+        name="Azure Computer Vision OCR",
+        role="ocr",
+        kind="api",
+        backend="api_azure",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="azure",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="按服务商条款",
+        size_mb=0,
+        url="",
+        source="https://learn.microsoft.com/azure/ai-services/computer-vision/",
+        advice="Azure Read API（analyze 轮询）；需 Endpoint 与 Key，ImageTrans 内置同款",
+    ),
+    dict(
+        id="ollama-ocr",
+        name="Ollama 视觉模型 OCR",
+        role="ocr",
+        kind="api",
+        backend="api_ollama",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="ollama",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="随本地模型",
+        size_mb=0,
+        url="",
+        source="https://ollama.com",
+        advice="本地 Ollama 视觉模型识字（无需云 key）；默认 127.0.0.1:11434，模型如 llava / qwen2.5vl",
+    ),
+    dict(
+        id="tesseract-ocr",
+        name="Tesseract OCR",
+        role="ocr",
+        kind="system",
+        backend="tesseract",
+        core=False,
+        advanced=False,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="Apache-2.0",
+        size_mb=0,
+        url="",
+        source="https://github.com/tesseract-ocr/tesseract",
+        advice="调用本机 tesseract 可执行与语言包；需先安装 tesseract 并加入 PATH",
+        supported=False,
+    ),
+    dict(
+        id="mit48px-ctc",
+        name="MIT48px CTC 行识别",
+        role="ocr",
+        kind="local",
+        backend="mit48px",
+        core=False,
+        advanced=True,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja"],
+        files=["ocr_ctc_fp16.onnx", "alphabet-all-v5.txt"],
+        license="见 Manga-Text-Segmentation",
+        size_mb=83,
+        url="",
+        source="https://github.com/ljsabc/Manga-Text-Segmentation",
+        advice="日文单行 CTC 识别（ImageTrans 内置同款）；请从 ImageTrans 的 mit 目录导入",
+    ),
+    dict(
+        id="mangatranslator-ocr",
+        name="MangaTranslator OCR",
+        role="ocr",
+        kind="api",
+        backend="api_mangatranslator",
+        core=False,
+        advanced=True,
+        requires_api=True,
+        api_provider="mangatranslator",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="见项目说明",
+        size_mb=0,
+        url="",
+        source="https://github.com/xulihang/ImageTrans_plugins/tree/master/mangaTranslatorOCR",
+        advice="一体式漫画识别服务（自建）：需填本地服务地址，默认 127.0.0.1:8080",
+    ),
+    dict(
+        id="zxingcpp-ocr",
+        name="ZXing 条码识别",
+        role="ocr",
+        kind="system",
+        backend="zxingcpp",
+        core=False,
+        advanced=True,
+        requires_api=False,
+        api_provider=None,
+        langs=[],
+        files=[],
+        license="Apache-2.0",
+        size_mb=0,
+        url="",
+        source="https://github.com/zxing-cpp/zxing-cpp",
+        advice="识别二维码/条形码文本（非漫画对白 OCR）；高级/可选",
+        supported=False,
+    ),
+    dict(
+        id="baidu-network",
+        name="百度 OCR（作者服务器通道）",
+        role="ocr",
+        kind="api",
+        backend="api_baidu_network",
+        core=False,
+        advanced=True,
+        requires_api=True,
+        api_provider="baidu-network",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="仅限 ImageTrans 授权",
+        size_mb=0,
+        url="",
+        source="https://www.basiccat.org",
+        advice="ImageTrans 作者服务器的百度通道：仅供了解，需要该服务授权，本程序不代管其凭据",
+        supported=False,
+    ),
+    dict(
         id="api-ocrspace",
         name="OCR.space（免费额度）",
         role="ocr",
@@ -800,6 +947,49 @@ class ModelRegistry:
             if response.status_code == 403:
                 return False, "Google Vision API Key 无效或未启用该 API"
             return True, ""
+        elif backend == "api_youdao":
+            if not config.get("appid") or not key:
+                return False, "有道 OCR 需要应用 ID 与应用密钥"
+            token = hashlib.sha256(
+                (config.get("appid", "") + key).encode()
+            ).hexdigest()
+            response = requests.get(
+                (base or "https://openapi.youdao.com").rstrip("/") + "/api",
+                params={
+                    "q": "test",
+                    "from": "en",
+                    "to": "zh-CHS",
+                    "appKey": config.get("appid", ""),
+                    "salt": "1",
+                    "sign": token[:32],
+                },
+                timeout=(10, 20),
+            )
+            body = response.json() if response.content else {}
+            code = str(body.get("errorCode", ""))
+            if code == "108":
+                return False, "有道应用 ID 或密钥无效"
+            return True, ""
+        elif backend == "api_azure":
+            if not base or not key:
+                return False, "Azure OCR 需要 Endpoint 与 Key"
+            response = requests.get(
+                base.rstrip("/") + "/vision/v3.2/read/analyzeResults/probe",
+                headers={"Ocp-Apim-Subscription-Key": key},
+                timeout=(10, 20),
+            )
+            if response.status_code in (401, 403):
+                return False, "Azure Key 无效"
+            return True, ""
+        elif backend == "api_ollama":
+            url = (base or "http://127.0.0.1:11434").rstrip("/")
+            try:
+                response = requests.get(url + "/api/tags", timeout=(5, 10))
+            except Exception as error:
+                return False, f"无法连接 Ollama：{error}"
+            if response.status_code == 200:
+                return True, ""
+            return False, f"Ollama 返回 {response.status_code}"
         elif backend == "api_ocrspace":
             response = requests.post(
                 (base or "https://api.ocr.space").rstrip("/") + "/parse/image",
