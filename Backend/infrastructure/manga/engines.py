@@ -389,9 +389,18 @@ def _ocr_custom(image, config):
     )
 
 
+_BAIDU_TOKENS = {}  # appid -> (token, expire_at)，与 ImageTrans 的 token 缓存一致
+
+
 def _baidu_token(config):
+    import time
+
     import requests
 
+    cache_key = (config.get("appid", ""), config.get("base_url", ""))
+    cached = _BAIDU_TOKENS.get(cache_key)
+    if cached and cached[1] > time.time() + 60:
+        return cached[0]
     response = requests.get(
         (config.get("base_url") or "https://aip.baidubce.com").rstrip("/")
         + "/oauth/2.0/token",
@@ -403,13 +412,16 @@ def _baidu_token(config):
         timeout=(10, 20),
     )
     response.raise_for_status()
-    token = (response.json() or {}).get("access_token")
+    payload = response.json() or {}
+    token = payload.get("access_token")
     if not token:
         raise PipelineError(
             "MODEL_API_AUTH",
             "百度 OCR 换取 access_token 失败，请检查 AppID 与 API Key",
             409,
         )
+    expires = int(payload.get("expires_in") or 2592000)
+    _BAIDU_TOKENS[cache_key] = (token, time.time() + expires)
     return token
 
 

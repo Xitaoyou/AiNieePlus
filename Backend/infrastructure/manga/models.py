@@ -434,7 +434,7 @@ CATALOGUE = [
         size_mb=0,
         url="",
         source="https://cloud.baidu.com/product/ocr",
-        advice="百度通用文字识别（accurate_basic）；需 AppID 与 API Key，自动换取 access_token",
+        advice="与 ImageTrans 的 baidu_accurate 同一接口：百度高精度 OCR（accurate_basic + detect_direction），需 AppID 与 API Key，token 自动缓存",
     ),
     dict(
         id="api-tencent",
