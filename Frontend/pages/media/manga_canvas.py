@@ -187,6 +187,7 @@ class MangaCanvas(QGraphicsView):
         qconfig.themeChanged.connect(self.apply_theme)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.pan_origin = None
+        self.last_clicked = ""
         self.box_preview = None
         self.live_layout = False
         self.last_layout_info = {}
@@ -281,7 +282,16 @@ class MangaCanvas(QGraphicsView):
 
     def selection_changed(self):
         items = [i for i in self.scene().selectedItems() if isinstance(i, RegionItem)]
-        self.regionSelected.emit(items[0].region["id"] if items else "")
+        if not items:
+            self.last_clicked = ""
+            self.regionSelected.emit("")
+            return
+        # 多选时 selectedItems() 的顺序是场景顺序，不是点击顺序；右栏应该
+        # 跟着「最后点的那个框」走，否则用户改样式会改到别的框上。
+        chosen = next(
+            (i for i in items if i.region["id"] == self.last_clicked), items[0]
+        )
+        self.regionSelected.emit(chosen.region["id"])
 
     def selected_ids(self):
         return [
@@ -328,6 +338,17 @@ class MangaCanvas(QGraphicsView):
             self.start = self.mapToScene(event.pos())
             self.points = [(max(0, self.start.x()), max(0, self.start.y()))]
             return
+        if event.button() == Qt.LeftButton:
+            hit = next(
+                (
+                    i
+                    for i in self.items(event.pos())
+                    if isinstance(i, RegionItem)
+                ),
+                None,
+            )
+            if hit is not None:
+                self.last_clicked = hit.region["id"]
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):

@@ -63,3 +63,39 @@ def test_wrapped_punctuation_does_not_force_needless_font_shrink():
     r.style.size = 28
     _, info = render_text(r.model_dump())
     assert info["font_size"] >= 28
+
+
+def test_kinsoku_keeps_punctuation_off_line_starts():
+    from Shared.manga_lettering import apply_kinsoku
+
+    # 竖排：列首的句号要挂回上一列，连续标点整体挪走
+    assert apply_kinsoku(["あいう", "。えおか", "きくけ"], True) == [
+        "あいう。",
+        "えおか",
+        "きくけ",
+    ]
+    assert apply_kinsoku(["あい", "。」か", "きく"], True)[0] == "あい。」"
+    # 竖排：正常内容不动
+    assert apply_kinsoku(["あい", "えお"], True) == ["あい", "えお"]
+
+
+def test_kinsoku_keeps_open_brackets_off_line_ends():
+    from Shared.manga_lettering import apply_kinsoku
+
+    assert apply_kinsoku(["あい「", "うえ"], False) == ["あい", "「うえ"]
+    assert apply_kinsoku(["あい『（", "うえ"], False) == ["あい", "『（うえ"]
+    # 行尾是句号不算违规
+    assert apply_kinsoku(["あい。", "うえ"], False) == ["あい。", "うえ"]
+
+
+def test_vertical_column_never_starts_with_punctuation():
+    r = Region(
+        layout_rect=Rect(x=0, y=0, width=52, height=240),
+        target="あいうえお。かきくけこ。さしすせそ",
+    )
+    r.style.vertical = True
+    r.style.autofit = False
+    r.style.size = 20
+    _, info = render_text(r.model_dump())
+    for line in info["lines"]:
+        assert not line.startswith(("。", "、", "」", "…")), line

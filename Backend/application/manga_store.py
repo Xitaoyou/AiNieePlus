@@ -96,11 +96,18 @@ class MangaStore:
     def history(self):
         if not self.root.exists():
             return []
+
+        def modified(path):
+            # 另一个请求可能刚好删掉这个工程；排序键里的 stat 在 try 外面，
+            # 抛出来会让 GET /api/v2/manga 整个 500，列表一条都拿不到。
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
         result = []
         for path in sorted(
-            self.root.glob("*/project.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+            self.root.glob("*/project.json"), key=modified, reverse=True
         )[:100]:
             try:
                 doc = self.load(path.parent.name)

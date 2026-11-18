@@ -38,6 +38,11 @@ class MangaSave(RequestModel):
     expected_revision: int = Field(ge=0)
 
 
+class MangaFixOverflow(RequestModel):
+    page_ids: list[str] | None = Field(default=None, max_length=2000)
+    region_ids: list[str] | None = Field(default=None, max_length=20000)
+
+
 class MangaOptions(RequestModel):
     replace_regions: bool = Field(default=False, strict=True)
     overwrite_source: bool = Field(default=False, strict=True)
@@ -207,7 +212,14 @@ def create_manga_router(runtime, authorized, service=None):
             return {"status": "success", "workspace": doc.model_dump(), "report": {}}
 
         return await run_queued(
-            runtime, "manga/import", action, lane="image", prefer=prefer
+            runtime,
+            "manga/import",
+            action,
+            lane="image",
+            prefer=prefer,
+            # 绑定工程 ID 才能被取消/删除工程时一并终止；不带 project_id 的
+            # 导入任务在调度器里无法按工程过滤，用户只能等它跑完。
+            project_id=body.workspace_id,
         )
 
     @router.get("/{workspace_id}")
@@ -271,6 +283,12 @@ def create_manga_router(runtime, authorized, service=None):
             prefer=prefer,
             project_id=workspace_id,
             operation_id=body.operation_id,
+        )
+
+    @router.post("/{workspace_id}/fix-overflow")
+    def fix_overflow(workspace_id: str, body: MangaFixOverflow):
+        return service.fix_overflow(
+            workspace_id, page_ids=body.page_ids, region_ids=body.region_ids
         )
 
     @router.post("/{workspace_id}/export")

@@ -101,6 +101,23 @@ class Region(MangaModel):
         return value if value == "auto" else LetterStyle.valid_color(value)
 
 
+class MangaPanel(MangaModel):
+    """分镜框：id 由服务端生成，rect 是 [x, y, w, h]，score 为检测置信度。"""
+
+    id: str = Field(default_factory=identifier, pattern=r"^[a-f0-9]{32}$")
+    rect: list[float] = Field(min_length=4, max_length=4)
+    score: float = Field(default=0.0, ge=0, le=1)
+
+    @field_validator("rect")
+    @classmethod
+    def finite_rect(cls, value):
+        if not all(math.isfinite(v) for v in value):
+            raise ValueError("分镜坐标必须是有限数值")
+        if value[2] <= 0 or value[3] <= 0:
+            raise ValueError("分镜宽高必须大于 0")
+        return value
+
+
 class MangaPage(MangaModel):
     id: str = Field(default_factory=identifier, pattern=r"^[a-f0-9]{32}$")
     name: str
@@ -109,7 +126,7 @@ class MangaPage(MangaModel):
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     regions: list[Region] = Field(default_factory=list)
-    panels: list[dict] = Field(default_factory=list)
+    panels: list[MangaPanel] = Field(default_factory=list)
     stages: dict[str, dict] = Field(default_factory=dict)
     default_style: LetterStyle | None = None
 

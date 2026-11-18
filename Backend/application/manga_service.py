@@ -39,8 +39,10 @@ class MangaService:
         self._pool_lock = threading.Lock()
 
     def close(self):
-        if self._pool:
-            self._pool.shutdown(wait=True, cancel_futures=True)
+        with self._pool_lock:
+            pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
 
     # 这些模型的主业是切面板，文字框召回偏低：面板照用，文字框交给行级模型。
     PANEL_ONLY_MODELS = ("manga-panel",)
@@ -66,7 +68,13 @@ class MangaService:
                     model_id=model_id,
                     confidence=spec.get("default_confidence") or confidence,
                 )
-            except (OSError, RuntimeError, PipelineError):
+            except PipelineError as error:
+                # 取消与进程崩溃必须冒泡：继续换模型只会拖长等待，
+                # 还会把真实原因埋进「本页未检出文字框」。
+                if error.code in {"CANCELLED", "MANGA_CHANGED", "MANGA_WORKER_CRASH"}:
+                    raise
+                continue
+            except (OSError, RuntimeError):
                 continue
             if any(box["class_id"] == 1 for box in boxes):
                 return boxes
@@ -90,6 +98,13 @@ class MangaService:
                 result = future.result(timeout=0.1)
                 break
             except concurrent.futures.TimeoutError:
+                if context.is_cancelled():
+                    # 子进程里的推理无法从外部打断，这里立刻放弃等待：
+                    # 结果会被丢弃，池保留给下一个任务排队。
+                    future.add_done_callback(lambda f: f.exception())
+                    raise PipelineError(
+                        "CANCELLED", "模型任务已取消，本次结果不写入", 409
+                    )
                 continue
             except BrokenProcessPool as error:
                 with self._pool_lock:
@@ -349,29 +364,25 @@ class MangaService:
                             candidates = [
                                 p
                                 for p in page.panels
-                                if p["rect"][0]
-                                <= x + w / 2
-                                <= p["rect"][0] + p["rect"][2]
-                                and p["rect"][1]
-                                <= y + h / 2
-                                <= p["rect"][1] + p["rect"][3]
+                                if p.rect[0] <= x + w / 2 <= p.rect[0] + p.rect[2]
+                                and p.rect[1] <= y + h / 2 <= p.rect[1] + p.rect[3]
                             ]
                             if candidates:
                                 region.panel_id = min(
                                     candidates,
-                                    key=lambda p: p["rect"][2] * p["rect"][3],
-                                )["id"]
+                                    key=lambda p: p.rect[2] * p.rect[3],
+                                ).id
                             regions.append(region)
                         panel_order = {
-                            p["id"]: i
+                            p.id: i
                             for i, p in enumerate(
                                 sorted(
                                     page.panels,
                                     key=lambda p: (
-                                        round(p["rect"][1] / 50),
-                                        -p["rect"][0]
+                                        round(p.rect[1] / 50),
+                                        -p.rect[0]
                                         if document.settings.right_to_left
-                                        else p["rect"][0],
+                                        else p.rect[0],
                                     ),
                                 )
                             )
@@ -508,7 +519,13 @@ class MangaService:
                         else "",
                     }
                     document = self.store.save(document, revision)
-                    report["completed"].append({"page_id": page.id, "stage": operation})
+                    if not (
+                        operation == "detect"
+                        and page.id in (report.get("empty_pages") or [])
+                    ):
+                        report["completed"].append(
+                            {"page_id": page.id, "stage": operation}
+                        )
                 except (OSError, RuntimeError) as error:
                     report["errors"].append(
                         {
@@ -519,7 +536,13 @@ class MangaService:
                         }
                     )
                 except PipelineError as error:
-                    if error.code in {"CANCELLED", "MANGA_CHANGED"}:
+                    # 取消、工程变更、模型进程崩溃、模型缺失/坏权重/依赖缺失
+                    # 都不是「这一页重试就能好」的问题：逐页重试只会把 1 次
+                    # 明确报错拖成 N 次，还让用户以为「部分页失败可以再试」。
+                    if (
+                        error.code in {"CANCELLED", "MANGA_CHANGED", "MANGA_WORKER_CRASH"}
+                        or error.code.startswith("MODEL_")
+                    ):
                         raise
                     report["errors"].append(
                         {"page_id": page.id, "stage": operation, **error.to_dict()}
@@ -766,6 +789,18 @@ class MangaService:
             },
         )
         report["warnings"].extend(warnings)
+        # 排版警告只留在本次 report 里就没人看得见：关掉任务面板后
+        # 「哪一框字号已经掉到 12px」无从查询。写回 region.warnings，
+        # 工程里就能持久保存，编辑器表格和导出质检都能读到。
+        by_region = {}
+        for warning in warnings:
+            region_id = warning.get("region_id")
+            if region_id:
+                by_region.setdefault(region_id, []).append(warning)
+        for region in page.regions:
+            region.warnings = [
+                item.get("message", "") for item in by_region.get(region.id, [])
+            ]
 
     def export(self, workspace_id, output_dir, mode="png", context=None):
         import shutil
@@ -828,10 +863,23 @@ class MangaService:
         if mode not in {"png", "jpeg", "zip"}:
             raise PipelineError("INVALID_EXPORT", "未知导出格式", 422)
         files = []
+        quality = []
         # Render from current data instead of exporting a stale preview.
         for index, page in enumerate(document.pages):
             self.cancelled(context)
-            self.render(document, page, document.revision, {"warnings": []}, context)
+            page_report = {"warnings": []}
+            self.render(document, page, document.revision, page_report, context)
+            # 排版质检信息以前直接扔掉，导出完成后用户无从知道哪些框字号过小
+            for warning in page_report["warnings"]:
+                quality.append(
+                    {
+                        "page_id": page.id,
+                        "page_name": page.name,
+                        "region_id": warning.get("region_id"),
+                        "code": warning.get("code"),
+                        "message": warning.get("message"),
+                    }
+                )
             name = f"{index + 1:04d}-{Path(page.name).stem}." + (
                 "jpg" if mode == "jpeg" else "png"
             )
@@ -847,12 +895,66 @@ class MangaService:
                 for path in files:
                     archive.write(path, path.name)
             files = [target]
-        return {"files": [str(p) for p in files]}
+        return {"files": [str(p) for p in files], "quality": quality}
+
+    def fix_overflow(self, workspace_id, page_ids=None, region_ids=None):
+        """把字号过小/溢出的框改成自动适应，并把排版框按需扩大。
+
+        这是「导出前最后一次批处理」：用户看到质检列表后一键处理，
+        改完仍走 store.save 的 revision CAS，前端照样能撤销。
+        """
+        codes = {"TEXT_OVERFLOW", "TEXT_SMALL"}
+        with self.store.lock:
+            document = self.store.load(workspace_id)
+            revision = document.revision
+            fixed = []
+            for page in document.pages:
+                if page_ids and page.id not in page_ids:
+                    continue
+                for region in page.regions:
+                    if region_ids and region.id not in region_ids:
+                        continue
+                    if not region.target.strip():
+                        continue
+                    # warnings 里存的是可读消息，codes 用于兼容结构化的旧数据
+                    flagged = bool(region.warnings) or any(
+                        code in str(w)
+                        for w in (region.warnings or [])
+                        for code in codes
+                    )
+                    if not flagged:
+                        # 没有渲染过就没有 warning：按几何规则兜底，
+                        # 固定字号且字号偏大的框同样是溢出高发户
+                        flagged = not region.style.autofit and region.style.size > 24
+                    if not flagged:
+                        continue
+                    region.style.autofit = True
+                    rect = region.layout_rect
+                    grow = 1.15
+                    width = min(page.width - rect.x, rect.width * grow)
+                    height = min(page.height - rect.y, rect.height * grow)
+                    if width > rect.width or height > rect.height:
+                        region.layout_rect = rect.model_copy(
+                            update={"width": width, "height": height}
+                        )
+                    region.warnings = []
+                    fixed.append(
+                        {"page_id": page.id, "region_id": region.id, "page": page.name}
+                    )
+            if fixed:
+                document = self.store.save(document, revision)
+            return {
+                "workspace": document.model_dump(),
+                "fixed": fixed,
+                "count": len(fixed),
+            }
 
     def import_translation(self, workspace_id, path):
-        document = self.store.load(workspace_id)
-        revision = document.revision
         path = Path(path)
+        if not path.is_file():
+            raise PipelineError(
+                "INVALID_MANGA_TRANSLATIONS", "译文文件不存在或不可读", 422
+            )
         if path.stat().st_size > 32 * 1024 * 1024:
             raise PipelineError("INVALID_MANGA_TRANSLATIONS", "译文文件过大", 422)
         values = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -864,19 +966,22 @@ class MangaService:
                 "需要以文字框 ID 为键的 i18next JSON 字符串对象",
                 422,
             )
-        regions = {r.id: r for p in document.pages for r in p.regions}
-        unknown = set(values) - regions.keys()
-        if unknown:
-            raise PipelineError(
-                "MANGA_TRANSLATION_IDS",
-                "译文包含其他工程的文字框 ID，未导入",
-                422,
-                {"unknown_ids": sorted(unknown)},
-            )
-        imported = 0
-        for key, value in values.items():
-            if not regions[key].target_locked:
-                regions[key].target = value
-                imported += 1
-        document = self.store.save(document, revision)
-        return {"workspace": document.model_dump(), "imported": imported}
+        with self.store.lock:
+            document = self.store.load(workspace_id)
+            revision = document.revision
+            regions = {r.id: r for p in document.pages for r in p.regions}
+            unknown = set(values) - regions.keys()
+            if unknown:
+                raise PipelineError(
+                    "MANGA_TRANSLATION_IDS",
+                    "译文包含其他工程的文字框 ID，未导入",
+                    422,
+                    {"unknown_ids": sorted(unknown)},
+                )
+            imported = 0
+            for key, value in values.items():
+                if not regions[key].target_locked:
+                    regions[key].target = value
+                    imported += 1
+            document = self.store.save(document, revision)
+            return {"workspace": document.model_dump(), "imported": imported}

@@ -31,6 +31,46 @@ def font_at(path, size):
     return ImageFont.truetype(path, size) if path else ImageFont.load_default(size=size)
 
 
+# 禁则处理（避头尾）：这些字符不能出现在行首
+KINSOKU_HEAD = "。、，．,」』）】》〉〕｝｠…‥！？!?：；:;ー〜～ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ"
+# 这些字符不能出现在行尾
+KINSOKU_TAIL = "「『（【《〈〔｛｟"
+
+
+def apply_kinsoku(lines, vertical):
+    """把不该出现在行首/行尾的标点挪到相邻行（避头尾）。
+
+    竖排的行是「一列从上到下」，行首＝列顶；横排的行是「一行从左到右」，
+    行首＝行左。连续标点（如 」。」）要整体处理，否则只移走第一个，
+    剩下的仍然顶在行首。
+    """
+    lines = [line for line in lines if line]
+    if vertical:
+        index = 1
+        while index < len(lines):
+            # 该列开头连续的禁则标点整体挂到上一列末尾。
+            # 注意每个元素可能是 "..." 这种多字符 token，所以按元素挪，
+            # 不能 join 成字符串后逐字处理。
+            length = len(lines[index])
+            moved = 0
+            while moved < length and lines[index][moved] in KINSOKU_HEAD:
+                moved += 1
+            if moved:
+                lines[index - 1] = lines[index - 1] + lines[index][:moved]
+                lines[index] = lines[index][moved:]
+                if not lines[index]:
+                    lines.pop(index)
+                    continue
+            index += 1
+        return lines
+    for index in range(len(lines) - 1):
+        # 开引号/开括号不能留在行尾，逐个推到下一行开头
+        while lines[index] and lines[index][-1] in KINSOKU_TAIL:
+            lines[index + 1] = lines[index][-1] + lines[index + 1]
+            lines[index] = lines[index][:-1]
+    return [line for line in lines if line]
+
+
 DEFAULT_PUNCTUATION_RULES = [
     {"src": source, "dst": target, "regex": False}
     for source, target in [
@@ -105,10 +145,12 @@ def render_text(
                 continue
             if vertical:
                 paragraph = tokens(paragraph.strip())
-                lines.extend(
-                    [paragraph[i : i + limit] for i in range(0, len(paragraph), limit)]
-                    or [""]
-                )
+                # 保持 token 列表（"..." 是一个元素），渲染阶段按元素取字形，
+                # join 成字符串会让 "..." 被拆成三个 '.' 而 boxes 里没有。
+                columns = [
+                    paragraph[i : i + limit] for i in range(0, len(paragraph), limit)
+                ] or [[]]
+                lines.extend(apply_kinsoku(columns, True))
             else:
                 line, length = "", 0
                 for char in paragraph:
@@ -128,6 +170,10 @@ def render_text(
                     line += char
                     length += advance
                 lines.append(line)
+        if not vertical:
+            # 横向断行结束后统一过一遍禁则：放在循环里会每个段落
+            # 都把已排好的行重扫一次，多段落时白付 O(n²)。
+            lines = apply_kinsoku(lines, False)
         if vertical:
             pitch = max(cell_w, cell_w * style["line_spacing"])
             tw = cell_w + max(0, len(lines) - 1) * pitch
@@ -251,6 +297,9 @@ def render_text(
         "invalid_rules": invalid_rules,
         "font_missing": font_missing,
         "font_size": size,
+        # 断行结果对外暴露：调用方（编辑器预览、质检、测试）不必再重算一遍
+        # 对外统一成字符串：竖排内部按 token 列表排版，但调用方不该关心这事
+        "lines": ["".join(line) if vertical else line for line in lines],
         "overflow": overflow and not style["autofit"],
         "below_minimum": style["autofit"] and (size < style["min_size"] or overflow),
     }
