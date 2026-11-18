@@ -42,6 +42,36 @@ class MangaService:
         if self._pool:
             self._pool.shutdown(wait=True, cancel_futures=True)
 
+    # 这些模型的主业是切面板，文字框召回偏低：面板照用，文字框交给行级模型。
+    PANEL_ONLY_MODELS = ("manga-panel",)
+    # 行级文字框来源，按可靠性排序
+    TEXT_LINE_FALLBACKS = ("japanese-lines", "ppocr-manga-det", "comic-speech-bubble")
+
+    def detect_text_lines(self, context, source, primary_id, confidence):
+        """用行级检测模型补齐文字框；不可用时返回空列表。"""
+        for model_id in self.TEXT_LINE_FALLBACKS:
+            if model_id == primary_id:
+                continue
+            try:
+                folder = self.models.folder(model_id)
+            except PipelineError:
+                continue
+            spec = self.models.spec(model_id)
+            try:
+                boxes = self.compute(
+                    context,
+                    operation="detect",
+                    image_path=str(source),
+                    folder=str(folder),
+                    model_id=model_id,
+                    confidence=spec.get("default_confidence") or confidence,
+                )
+            except (OSError, RuntimeError, PipelineError):
+                continue
+            if any(box["class_id"] == 1 for box in boxes):
+                return boxes
+        return []
+
     def compute(self, context, **kwargs):
         from concurrent.futures.process import BrokenProcessPool
 
@@ -129,7 +159,17 @@ class MangaService:
         # Recognize each page completely before advancing to the next page.
         if stage == "recognize":
             document = self.store.load(workspace_id)
-            reports = {"completed": [], "errors": [], "warnings": []}
+            # 预先声明所有可能出现的聚合键：逐页 sub-report 里 setdefault 出来的
+            # 键（empty_pages / skipped_pages / fallback_pages）必须在这里存在，
+            # 否则汇总时会被静默丢弃。
+            reports = {
+                "completed": [],
+                "errors": [],
+                "warnings": [],
+                "empty_pages": [],
+                "skipped_pages": [],
+                "fallback_pages": [],
+            }
             pages = [p for p in document.pages if not page_ids or p.id in page_ids]
             for index, page in enumerate(pages):
                 from dataclasses import replace
@@ -155,7 +195,9 @@ class MangaService:
                         options=options,
                     )
                     for key, values in reports.items():
-                        values.extend(result["report"][key])
+                        # 子阶段只在真正发生时才 setdefault 这些键，缺键要按空处理，
+                        # 否则整轮 recognize 会抛 KeyError。
+                        values.extend(result["report"].get(key) or ())
                 if context.on_progress:
                     context.on_progress(
                         {
@@ -216,7 +258,7 @@ class MangaService:
                 try:
                     if operation == "detect":
                         if page.regions and not options.get("replace_regions"):
-                            report["warnings"].append(
+                            report.setdefault("skipped_pages", []).append(
                                 {
                                     "page_id": page.id,
                                     "message": "已有文字框，未重复检测；替换需要明确选择",
@@ -239,18 +281,37 @@ class MangaService:
                             model_id=document.settings.detector,
                             confidence=document.settings.confidence,
                         )
-                        if not results:
-                            report["warnings"].append(
-                                {
-                                    "page_id": page.id,
-                                    "message": (
-                                        "本页未检出文字框：可尝试降低检测阈值、"
-                                        "更换检测模型（如 Legacy 旧版权重建议 0.25），"
-                                        "或确认该页确实包含对白气泡"
-                                    ),
-                                }
+                        # 面板模型的文字框召回偏低（单页大图上甚至只剩一个整页
+                        # class 0 框）。面板结果照用，文字框统一由行级模型给出，
+                        # 才能避免「整部漫画只测出几个框」。
+                        needs_lines = (
+                            not results
+                            or not any(d["class_id"] == 1 for d in results)
+                            or document.settings.detector in self.PANEL_ONLY_MODELS
+                        )
+                        if needs_lines:
+                            lines = self.detect_text_lines(
+                                context,
+                                source,
+                                document.settings.detector,
+                                document.settings.confidence,
                             )
+                            if lines:
+                                results = [
+                                    d for d in results if d["class_id"] == 0
+                                ] + lines
+                                report.setdefault("fallback_pages", []).append(
+                                    {
+                                        "page_id": page.id,
+                                        "model": document.settings.detector,
+                                    }
+                                )
+                        if not results:
+                            report.setdefault("empty_pages", []).append(page.id)
                             continue
+                        if not any(d["class_id"] == 1 for d in results):
+                            # 回退也拿不到文字框：保留面板结果，但明确告知没检出文字。
+                            report.setdefault("empty_pages", []).append(page.id)
                         page.panels = (
                             [
                                 {
@@ -347,7 +408,7 @@ class MangaService:
                             api_config = self.models.api_config(
                                 spec.get("api_provider")
                             )
-                            local_engine = backend == "api_ollama"
+                            local_engine = backend in {"api_ollama", "api_ocrspace"}
                             if not api_config and not local_engine:
                                 raise PipelineError(
                                     "MODEL_API_NOT_CONFIGURED",

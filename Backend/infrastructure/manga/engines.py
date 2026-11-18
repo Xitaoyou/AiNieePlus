@@ -172,8 +172,15 @@ def detect(image, folder, model_id, confidence=0.5):
         import json
 
         params = json.loads((folder / "model.json").read_text(encoding="utf-8-sig"))
-        net = cv2.dnn.readNetFromDarknet(
-            str(folder / "model.cfg"), str(folder / "model.weights")
+        # OpenCV 的 darknet 导入器按 ANSI 打开文件，路径含非 ASCII 字符时
+        # 会报 "Failed to open NetParameter file"；改用字节缓冲避开路径编码。
+        cfg_bytes = np.frombuffer((folder / "model.cfg").read_bytes(), dtype=np.uint8)
+        weights_bytes = np.frombuffer(
+            (folder / "model.weights").read_bytes(), dtype=np.uint8
+        )
+        net = _cached_engine(
+            f"darknet:{folder}:{params.get('width')}x{params.get('height')}",
+            lambda: cv2.dnn.readNetFromDarknet(cfg_bytes, weights_bytes),
         )
         detector = cv2.dnn_DetectionModel(net)
         detector.setInputParams(

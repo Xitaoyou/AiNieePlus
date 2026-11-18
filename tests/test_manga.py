@@ -125,6 +125,13 @@ class StubModels:
 class StubService(MangaService):
     def compute(self, context, **kw):
         if kw["operation"] == "detect":
+            if kw.get("model_id") in self.TEXT_LINE_FALLBACKS:
+                # 行级模型：只给文字框
+                return [
+                    {"class_id": 1, "score": 0.9, "rect": [20, 20, 100, 50]},
+                    {"class_id": 1, "score": 0.8, "rect": [130, 20, 90, 50]},
+                    {"class_id": 1, "score": 0.7, "rect": [20, 90, 100, 50]},
+                ]
             return [
                 {"class_id": 0, "score": 0.9, "rect": [0, 0, 240, 160]},
                 {"class_id": 1, "score": 0.9, "rect": [20, 20, 100, 50]},
@@ -157,8 +164,25 @@ def test_panel_is_not_a_text_region(workspace):
         doc.id, "detect", page_ids=[doc.pages[0].id], options={"replace_regions": True}
     )
     page = result["workspace"]["pages"][0]
-    assert len(page["panels"]) == 1 and len(page["regions"]) == 1
-    assert page["regions"][0]["panel_id"] == page["panels"][0]["id"]
+    # 面板模型只贡献 panels；文字框由行级模型补齐（3 个），自身不产生 region
+    assert len(page["panels"]) == 1
+    assert len(page["regions"]) == 3
+    assert all(r["panel_id"] == page["panels"][0]["id"] for r in page["regions"])
+
+
+def test_panel_model_lines_come_from_line_detector(workspace):
+    store, doc = workspace
+    result = StubService(store, StubModels()).run(
+        doc.id, "detect", page_ids=[doc.pages[0].id], options={"replace_regions": True}
+    )
+    report = result["report"]
+    assert report["errors"] == []
+    assert len(report["fallback_pages"]) == 1
+    assert report["fallback_pages"][0]["model"] == "manga-panel"
+    # 面板模型自身的 class 1 结果被行级模型替换，不会出现重复框
+    regions = result["workspace"]["pages"][0]["regions"]
+    rects = [(r["ocr_rect"]["x"], r["ocr_rect"]["y"]) for r in regions]
+    assert len(rects) == len(set(rects))
 
 
 def test_translation_adapter_validates_real_intermediate_schema(workspace, monkeypatch):

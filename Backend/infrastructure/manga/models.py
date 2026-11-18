@@ -61,7 +61,7 @@ CATALOGUE = [
         kind="local",
         backend="yolo_v8",
         default_confidence=0.35,
-        core=False,
+        core=True,
         advanced=False,
         requires_api=False,
         api_provider=None,
@@ -71,7 +71,10 @@ CATALOGUE = [
         size_mb=11,
         url="https://github.com/xulihang/balloon-dataset/releases/download/models/japanese-lines.zip",
         source="公开漫画检测权重仓库",
-        advice="日文竖排行级检测，适合行分组与竖排漫画",
+        advice=(
+            "日文竖排行级检测，随包内置（11 MB）。覆盖稳定，面板模型只出"
+            "整页面板框时会自动用它补齐文字框；也可直接作为默认检测器"
+        ),
     ),
     dict(
         id="japanese-manga",
@@ -232,7 +235,7 @@ CATALOGUE = [
         kind="local",
         backend="yolov4",
         default_confidence=0.25,
-        core=True,
+        core=False,
         advanced=False,
         requires_api=False,
         api_provider=None,
@@ -242,7 +245,7 @@ CATALOGUE = [
         size_mb=22,
         url="https://github.com/xulihang/ObjectDetector/releases/download/models/yolo_darknet.zip",
         source="公开检测权重仓库",
-        advice="Scaled YOLOv4 日漫气泡检测（旧版）；内置随包提供。旧版权重置信度偏低，建议阈值 0.25 左右；若整页无框可再调低",
+        advice="Scaled YOLOv4 日漫气泡检测旧版（约 22 MB，按需下载）。置信度偏低，选中后自动用阈值 0.25；适合老排版日漫，新作建议优先 japanese-manga 或 manga-panel",
     ),
     # ================= 本地 OCR（pip 模型 / ONNX 权重）=================
     dict(
@@ -529,6 +532,7 @@ CATALOGUE = [
         advanced=False,
         requires_api=True,
         api_provider="ocrspace",
+        free_key="helloworld",
         langs=["ja", "zh", "ko", "en"],
         files=[],
         license="按服务商条款（免费额度）",
@@ -845,7 +849,16 @@ class ModelRegistry:
         for spec in CATALOGUE:
             if spec["id"] == model_id:
                 return spec
-        raise PipelineError("UNKNOWN_MANGA_MODEL", "未知漫画模型", 422)
+        # 兼容旧工程包与旧界面把显示名写进设置的情况
+        if model_id:
+            for spec in CATALOGUE:
+                if spec.get("name") == model_id:
+                    return spec
+        raise PipelineError(
+            "UNKNOWN_MANGA_MODEL",
+            f"未知漫画模型：{model_id}；请在项目设置里重新选择检测或 OCR 模型",
+            422,
+        )
 
     def folder(self, model_id):
         spec = self.spec(model_id)
@@ -1108,6 +1121,15 @@ class ModelRegistry:
             row["path"] = ""
             if kind == "api":
                 config = apis.get(spec.get("api_provider"), {})
+                if spec.get("free_key") and not config:
+                    # 免费额度通道（如 OCR.space）无需配置即可直接用
+                    row["installed"] = True
+                    row["api_ready"] = True
+                    row["api_verified"] = True
+                    row["api_has_key"] = True
+                    row["api_error"] = ""
+                    result.append(row)
+                    continue
                 row["installed"] = bool(config)
                 row["api_ready"] = bool(config.get("verified"))
                 row["api_verified"] = bool(config.get("verified"))

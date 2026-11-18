@@ -10,10 +10,10 @@
       "license": "AGPL-3.0"
     },
     {
-      "id": "legacy-balloon-yolov4",
-      "source": "公开检测权重仓库",
-      "url": "https://github.com/xulihang/ObjectDetector/releases/download/models/yolo_darknet.zip",
-      "license": "见权重说明"
+      "id": "japanese-lines",
+      "source": "公开漫画检测权重仓库",
+      "url": "https://github.com/xulihang/balloon-dataset/releases/download/models/japanese-lines.zip",
+      "license": "见原仓库"
     },
     {
       "id": "mangaocr",

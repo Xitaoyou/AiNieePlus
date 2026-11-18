@@ -169,6 +169,8 @@ class MangaCanvas(QGraphicsView):
     layoutMeasured = pyqtSignal(str, dict)
     geometryEscapeRequested = pyqtSignal()
     escapeRequested = pyqtSignal()
+    panStarted = pyqtSignal()
+    panFinished = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -318,6 +320,9 @@ class MangaCanvas(QGraphicsView):
     def mousePressEvent(self, event):
         if event.button() == Qt.MiddleButton:
             self.pan_origin = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            self.panStarted.emit()
+            event.accept()
             return
         if event.button() == Qt.LeftButton and self.mode in {"add", "mask", "eraser"}:
             self.start = self.mapToScene(event.pos())
@@ -326,6 +331,17 @@ class MangaCanvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if (
+            self.pan_origin is None
+            and event.buttons() & Qt.MiddleButton
+            and self.mode == "select"
+        ):
+            # 中键在别的控件里按下后移进画布，同样接管拖动
+            self.pan_origin = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            self.panStarted.emit()
+            event.accept()
+            return
         if self.pan_origin is not None:
             delta = event.pos() - self.pan_origin
             self.pan_origin = event.pos()
@@ -371,6 +387,8 @@ class MangaCanvas(QGraphicsView):
     def mouseReleaseEvent(self, event):
         if self.pan_origin is not None:
             self.pan_origin = None
+            self.unsetCursor()
+            self.panFinished.emit()
             return
         if self.start is not None:
             if self.box_preview is not None:

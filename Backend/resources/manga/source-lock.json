@@ -18,10 +18,9 @@
       "rec.onnx": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
       "cls.onnx": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c"
     },
-    "legacy-balloon-yolov4": {
-      "model.weights": "b348687040b3752992ffb06823a1197c4c84486cd0ea5d4be4f6b4fb5b664001",
-      "model.cfg": "33da77e7e0c4bf325b0123fd00f62a40388afe1a273a2040682c9168d84d156f",
-      "model.json": "56d7a4d577c764843cb667212297f0941b843be018337ba69e7ae5057d02b278"
+    "japanese-lines": {
+      "model.onnx": "db6bd8527a4175bb2c326b863bec397d27507f14214dc963354751d5cb44d447",
+      "model.json": "a44d3312684de9519956e61368952332e0db188e1d71c28bd5c5c7d940885215"
     }
   },
   "font_sha256": "68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5"

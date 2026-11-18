@@ -60,9 +60,10 @@ def test_catalogue_covers_detection_ocr_api_and_system_models():
     assert all(s.get("advanced") for s in heavy), "≥150MB 的非内置模型应标记为高级"
     assert any("japanese-manga" == s["id"] for s in detect)
     assert any(s["id"] == "ppocr-manga-det" for s in detect)
-    # legacy Scaled YOLOv4 默认自带；YOLOv8 系列使用经典输出后端
+    # legacy Scaled YOLOv4 属于可选旧版：默认不随包，只提供公开版按需下载
     legacy = next(s for s in detect if s["id"] == "legacy-balloon-yolov4")
-    assert legacy["core"] is True and legacy["url"], "legacy 应随包提供"
+    assert legacy["core"] is False and legacy["url"], "legacy 应提供按需下载地址"
+    assert legacy["size_mb"] <= 40, "legacy 只保留精简公开版"
     assert legacy["backend"] == "yolov4"
     for model_id in (
         "japanese-lines",
@@ -172,9 +173,10 @@ def test_model_dialog_groups_and_marks_missing_api(registry):
     # 第一行是分组标题，第二行起是检测模型
     assert "检测模型" in dialog.table.item(0, 0).text()
     assert dialog.table.item(1, 1).text().startswith("检测")
-    # tooltip 必须说明功能与来源
+    # tooltip 必须说明功能、影响与体积
     tooltip = dialog.table.item(1, 0).toolTip()
-    assert "来源" in tooltip
+    assert "体积" in tooltip or "MB" in tooltip
+    assert "影响" in tooltip
     # 至少存在提示配置 API 或缺省状态的行
     states = [
         dialog.table.item(r, 2).text()

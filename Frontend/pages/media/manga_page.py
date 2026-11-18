@@ -410,7 +410,7 @@ class ModelDialog(QDialog):
             (0, QHeaderView.Interactive, 240),   # 模型
             (1, QHeaderView.Fixed, 120),         # 类型
             (2, QHeaderView.Fixed, 170),         # 状态
-            (3, QHeaderView.Fixed, 70),          # 大小
+            (3, QHeaderView.Interactive, 84),    # 大小
             (4, QHeaderView.Stretch, 0),         # 功能说明
             (5, QHeaderView.Interactive, 130),   # 来源许可
             (6, QHeaderView.Fixed, 100),         # 操作
@@ -448,24 +448,6 @@ class ModelDialog(QDialog):
         "system": "系统 OCR",
         "inpaint": "去字",
     }
-
-    def row_state(self, model):
-        kind = model.get("kind", "local")
-        if not model.get("supported", True):
-            return "尚未适配", True
-        if kind == "api":
-            if not model.get("installed"):
-                return "未启用（点「配置 API」）", False
-            if not model.get("api_ready"):
-                return "⚠ 需要配置 API", True
-            return "已配置", False
-        if kind == "system":
-            return ("系统可用" if model.get("installed") else "系统不支持"), False
-        if kind == "package":
-            if model.get("installed"):
-                return "依赖已就绪", False
-            return "需安装 pip 包", True
-        return ("已安装" if model.get("installed") else "未安装"), False
 
     def configure_api(self):
         self.configure_api_for(self.selected())
@@ -532,6 +514,49 @@ class ModelDialog(QDialog):
         ("系统 OCR（无需下载）", lambda m: m.get("kind") == "system"),
         ("去字模型", lambda m: m.get("role") == "inpaint"),
     ]
+
+    ROLE_FEATURE = {
+        "detect": (
+            "定位对白气泡与分镜",
+            "决定后续识别与排版范围；漏检会少翻，误检会产生空框",
+        ),
+        "ocr": (
+            "把框内文字转成原文",
+            "决定原文准确率；日漫竖排优先选支持竖排的引擎",
+        ),
+        "inpaint": ("擦除原文字并补背景", "影响成品干净程度与导出耗时"),
+    }
+
+    def tooltip_for(self, model):
+        # 悬停展示：功能定位、体积、建议阈值、语言、特点与对产出的影响
+        role = model.get("role", "ocr")
+        feature, impact = self.ROLE_FEATURE.get(role, ("", ""))
+        kind_label = {
+            "local": "本地模型",
+            "package": "Python 包",
+            "api": "云 API",
+            "system": "系统组件",
+        }.get(model.get("kind", "local"), "本地模型")
+        lines = [model.get("name", model["id"])]
+        if feature:
+            lines.append(f"{kind_label} · {feature}")
+        if model.get("size_mb"):
+            lines.append(f"体积约 {model['size_mb']} MB")
+        if model.get("default_confidence"):
+            lines.append(f"建议阈值 {model['default_confidence']}")
+        if model.get("langs"):
+            lines.append("语言：" + "、".join(model["langs"]))
+        lines.append("")
+        lines.append("特点：" + (model.get("advice") or "—"))
+        if impact:
+            lines.append("影响：" + impact)
+        if model.get("requires_api") and not model.get("api_ready"):
+            lines.append("")
+            lines.append("尚未配置 API；配置并验证后才会出现在项目设置里")
+        elif model.get("api_error"):
+            lines.append("")
+            lines.append("上次验证：" + str(model["api_error"]))
+        return "\n".join(lines)
 
     def row_state(self, model):
         kind = model.get("kind", "local")
@@ -640,14 +665,7 @@ class ModelDialog(QDialog):
                 item = QTableWidgetItem(value)
                 if col == 2 and warn:
                     item.setForeground(red)
-                tooltip = model["advice"]
-                if model.get("langs"):
-                    tooltip += "\n支持语言：" + ", ".join(model["langs"])
-                if model.get("source"):
-                    tooltip += "\n来源：" + model["source"]
-                if kind == "api" and not model.get("api_ready"):
-                    tooltip += "\n⚠ 需要配置 API 并通过验证后才会出现在项目设置里"
-                item.setToolTip(tooltip)
+                item.setToolTip(self.tooltip_for(model))
                 self.table.setItem(row, col, item)
             if kind == "api" and not model.get("api_ready"):
                 for col in range(self.table.columnCount()):
@@ -1542,6 +1560,8 @@ class MangaPage(QWidget):
         pan_row.addWidget(self.pan_hint_label)
         self.pan_hint.adjustSize()
         self.pan_hint.hide()
+        self.canvas.panStarted.connect(self.on_pan_started)
+        self.canvas.panFinished.connect(self.on_pan_finished)
         # ---- 右栏：文字 / 排版 / 阅读顺序（滚动，阅读顺序默认折叠）----
         scroll = QScrollArea()
         scroll.setMinimumWidth(360)
@@ -2013,9 +2033,22 @@ class MangaPage(QWidget):
         )
         self.pan_hint.raise_()
 
+    def on_pan_started(self):
+        """拖动期间收起提示浮层，避免和光标抢注意力。"""
+        self._pan_hint_timer = None
+        if getattr(self, "pan_hint", None):
+            self.pan_hint.hide()
+
+    def on_pan_finished(self):
+        scale = self.canvas.transform().m11()
+        self._pan_hint_at = 0.0
+        self.maybe_show_pan_hint(max(scale, 0.01))
+
     def maybe_show_pan_hint(self, scale):
         """画面比“适应窗口”更大时，提示可以用中键拖动。"""
         if not getattr(self, "pan_hint", None) or not self.image_data:
+            return
+        if getattr(self.canvas, "pan_origin", None) is not None:
             return
         scene = self.canvas.sceneRect()
         viewport = self.canvas.viewport()
@@ -2617,8 +2650,8 @@ class MangaPage(QWidget):
     def fill_model_choices(self):
         catalogue = getattr(self, "model_catalogue", None) or []
         for combo, role, current in (
-            (getattr(self, "detector", None), "detect", self.detector.currentText()),
-            (getattr(self, "ocr", None), "ocr", self.ocr.currentText()),
+            (getattr(self, "detector", None), "detect", self.detector.currentData()),
+            (getattr(self, "ocr", None), "ocr", self.ocr.currentData()),
         ):
             if combo is None:
                 continue
@@ -3641,8 +3674,8 @@ class MangaPage(QWidget):
             deepcopy(self.document["settings"])
             if self.document
             else {
-                "detector": self.detector.currentText(),
-                "ocr": self.ocr.currentText(),
+                "detector": self.detector.currentData(),
+                "ocr": self.ocr.currentData(),
                 "source_language": dialog.source_language.currentData(),
                 "target_language": dialog.target_language.currentData(),
                 "confidence": self.confidence.value(),
@@ -4013,6 +4046,39 @@ class MangaPage(QWidget):
                 lambda r: (self.loaded(r["workspace"]), self.refresh_history()),
             )
 
+    @staticmethod
+    def summarize_report(report):
+        # 逐页提示合并成带计数的摘要，避免同一句话刷满状态栏
+        from collections import Counter
+
+        parts = []
+        messages = [str(e.get("message", e)) for e in report.get("errors", [])]
+        if messages:
+            top, count = Counter(messages).most_common(1)[0]
+            parts.append(top + (f"（{count} 处）" if count > 1 else ""))
+        empty = report.get("empty_pages") or []
+        if empty:
+            numbers = "、".join(str(n) for n in empty[:4])
+            suffix = f" 等 {len(empty)}" if len(empty) > 4 else ""
+            parts.append(
+                f"第 {numbers}{suffix} 页未检出文字框：可降低检测阈值或换检测模型"
+            )
+        skipped = report.get("skipped_pages") or []
+        if skipped:
+            parts.append(
+                f"{len(skipped)} 页已有文字框，已跳过检测（替换前需先清空该页）"
+            )
+        fallback = report.get("fallback_pages") or []
+        if fallback:
+            parts.append(f"{len(fallback)} 页由面板模型回退到行级检测补出文字框")
+        warnings = report.get("warnings", [])
+        if warnings:
+            top, count = Counter(
+                str(w.get("message", w)) for w in warnings
+            ).most_common(1)[0]
+            parts.append(top + (f"（{count} 页）" if count > 1 else ""))
+        return "；".join(parts[:3])
+
     def show_report(self, result):
         report = result.get("report", {})
         self.last_task_report = deepcopy(report)
@@ -4034,11 +4100,8 @@ class MangaPage(QWidget):
                 if total
                 else "没有需要翻译的原文；请先 OCR，已有译文默认保留"
             )
-        errors = report.get("errors", [])
-        warnings = report.get("warnings", [])
         self.status.setText(
-            "；".join(str(e.get("message", e)) for e in errors + warnings)
-            or "处理完成，请校对后继续"
+            self.summarize_report(report) or "处理完成，请校对后继续"
         )
 
     def export(self):

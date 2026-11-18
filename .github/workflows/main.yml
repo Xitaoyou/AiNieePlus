@@ -271,7 +271,7 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Publish versioned prerelease
+      - name: Publish versioned release
         run: |
           set -euo pipefail
 
@@ -284,8 +284,17 @@ jobs:
           tag="manga-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}"
           sha256sum "${assets[@]}" > release-assets/SHA256SUMS.txt
           gh release create "$tag" "${assets[@]}" release-assets/SHA256SUMS.txt \
-            --title "AiNieePlus 漫画翻译 · Windows x64 · ${GITHUB_SHA:0:7}" \
-            --notes "包含本地漫画识别、编辑排版、完整离线核心模型及 Windows x86-64 安装程序。" \
-            --generate-notes \
-            --prerelease \
+            --title "AiNieePlus 漫画翻译 ${GITHUB_RUN_NUMBER} · Windows x64" \
+            --notes "$(cat <<'NOTES'
+          正式版：本地漫画识别、编辑排版、完整离线核心模型与 Windows x86-64 安装程序。
+
+          - 检测：面板模型只输出整页面板框时，自动用行级模型补齐文字框
+          - 模型中心：44 个检测/OCR 模型，悬停查看功能介绍与影响，大小列可拉宽
+          - 云 OCR：OCR.space 等免费通道无需配置即可直接使用
+          - 编辑器：中键拖动画面带光标反馈，拖动时不再弹出提示浮层
+          - 状态栏提示按类型合并计数，不再逐页刷屏
+
+          下载 Portable 压缩包解压即用，或使用安装程序。
+          NOTES
+          )" \
             --target "$GITHUB_SHA"
