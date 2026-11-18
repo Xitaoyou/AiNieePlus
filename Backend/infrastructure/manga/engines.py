@@ -413,6 +413,249 @@ def _baidu_token(config):
     return token
 
 
+def _tencent_call(config, image_bytes, action="GeneralBasicOCR", probe=False):
+    """腾讯云 OCR：TC3-HMAC-SHA256 签名调用。"""
+    import hashlib
+    import hmac
+    import json as jsonlib
+    import time
+
+    import requests
+
+    secret_id = config.get("appid", "")
+    secret_key = config.get("api_key", "")
+    if not secret_id or not secret_key:
+        raise PipelineError(
+            "MODEL_API_NOT_CONFIGURED",
+            "腾讯 OCR 需要 SecretId 与 SecretKey：请在模型中心填写",
+            409,
+        )
+    host = "ocr.tencentcloudapi.com"
+    service = "ocr"
+    region = config.get("region") or "ap-guangzhou"
+    timestamp = int(time.time())
+    date = time.strftime("%Y-%m-%d", time.gmtime(timestamp))
+    payload = jsonlib.dumps(
+        {"ImageBase64": (image_bytes and __import__("base64").b64encode(image_bytes).decode()) or ""}
+    )
+    hashed_payload = hashlib.sha256(payload.encode()).hexdigest()
+    canonical_headers = (
+        "content-type:application/json; charset=utf-8\nhost:" + host + "\n"
+    )
+    signed_headers = "content-type;host"
+    canonical_request = (
+        "POST\n/\n\n"
+        + canonical_headers
+        + "\n"
+        + signed_headers
+        + "\n"
+        + hashed_payload
+    )
+    credential_scope = f"{date}/{service}/tc3_request"
+    string_to_sign = (
+        "TC3-HMAC-SHA256\n"
+        + str(timestamp)
+        + "\n"
+        + credential_scope
+        + "\n"
+        + hashlib.sha256(canonical_request.encode()).hexdigest()
+    )
+
+    def sign(key, message):
+        return hmac.new(key, message.encode(), hashlib.sha256).digest()
+
+    secret_date = sign(("TC3" + secret_key).encode(), date)
+    secret_service = sign(secret_date, service)
+    secret_signing = sign(secret_service, "tc3_request")
+    signature = hmac.new(
+        secret_signing, string_to_sign.encode(), hashlib.sha256
+    ).hexdigest()
+    authorization = (
+        f"TC3-HMAC-SHA256 Credential={secret_id}/{credential_scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    response = requests.post(
+        f"https://{host}",
+        headers={
+            "Authorization": authorization,
+            "Content-Type": "application/json; charset=utf-8",
+            "Host": host,
+            "X-TC-Action": action,
+            "X-TC-Timestamp": str(timestamp),
+            "X-TC-Version": "2018-11-19",
+            "X-TC-Region": region,
+        },
+        data=payload.encode(),
+        timeout=(10, 60),
+    )
+    body = response.json() if response.content else {}
+    if probe:
+        if response.status_code == 200 and not (body.get("Response") or {}).get("Error"):
+            return True
+        error = (body.get("Response") or {}).get("Error") or {}
+        raise PipelineError(
+            "MODEL_API_AUTH",
+            "腾讯 OCR 鉴权失败：" + str(error.get("Message") or response.status_code),
+            409,
+        )
+    response.raise_for_status()
+    error = (body.get("Response") or {}).get("Error")
+    if error:
+        raise PipelineError(
+            "MODEL_API_ERROR",
+            "腾讯 OCR 返回错误：" + str(error.get("Message", "")),
+            409,
+        )
+    return body
+
+
+def _ocr_tencent(image, config):
+    from io import BytesIO
+
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, "PNG")
+    body = _tencent_call(config, buffer.getvalue())
+    detections = (body.get("Response") or {}).get("TextDetections") or []
+    return "\n".join(str(item.get("DetectedText", "")) for item in detections).strip()
+
+
+def _ocr_clova(image, config):
+    import base64
+    import time
+    from io import BytesIO
+    from uuid import uuid4
+
+    import requests
+
+    url = config.get("base_url", "")
+    secret = config.get("api_key", "")
+    if not url or not secret:
+        raise PipelineError(
+            "MODEL_API_NOT_CONFIGURED",
+            "CLOVA OCR 需要 Invoke URL 与 Secret Key：请在模型中心填写",
+            409,
+        )
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, "PNG")
+    response = requests.post(
+        url,
+        headers={"X-OCR-SECRET": secret, "Content-Type": "application/json"},
+        json={
+            "version": "V2",
+            "requestId": uuid4().hex,
+            "timestamp": int(time.time() * 1000),
+            "images": [
+                {
+                    "format": "png",
+                    "name": "page",
+                    "data": base64.b64encode(buffer.getvalue()).decode(),
+                }
+            ],
+        },
+        timeout=(10, 60),
+    )
+    response.raise_for_status()
+    payload = response.json() or {}
+    images = payload.get("images") or []
+    fields = images[0].get("fields") if images else []
+    return "\n".join(
+        str(item.get("inferText", "")) for item in (fields or [])
+    ).strip()
+
+
+def _ocr_abbyy(image, config):
+    from io import BytesIO
+
+    import requests
+
+    appid = config.get("appid", "")
+    password = config.get("api_key", "")
+    if not appid or not password:
+        raise PipelineError(
+            "MODEL_API_NOT_CONFIGURED",
+            "ABBYY OCR 需要 Application ID 与密码",
+            409,
+        )
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, "PNG")
+    language = config.get("model") or "Japanese,Chinese,English"
+    response = requests.post(
+        (config.get("base_url") or "https://ocrsdk.com").rstrip("/")
+        + "/processImage",
+        params={"language": language, "exportFormat": "txt"},
+        files={"image": ("image.png", buffer.getvalue(), "image/png")},
+        auth=(appid, password),
+        timeout=(10, 120),
+    )
+    response.raise_for_status()
+    return (response.text or "").strip()
+
+
+def _ocr_google(image, config):
+    import base64
+    from io import BytesIO
+
+    import requests
+
+    key = config.get("api_key", "")
+    if not key:
+        raise PipelineError(
+            "MODEL_API_NOT_CONFIGURED", "Google Vision 需要 API Key", 409
+        )
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, "PNG")
+    response = requests.post(
+        (config.get("base_url") or "https://vision.googleapis.com").rstrip("/")
+        + "/v1/images:annotate",
+        params={"key": key},
+        json={
+            "requests": [
+                {
+                    "image": {
+                        "content": base64.b64encode(buffer.getvalue()).decode()
+                    },
+                    "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
+                }
+            ]
+        },
+        timeout=(10, 60),
+    )
+    response.raise_for_status()
+    responses = (response.json() or {}).get("responses") or []
+    if not responses:
+        return ""
+    full = responses[0].get("fullTextAnnotation") or {}
+    return str(full.get("text", "")).strip()
+
+
+def _ocr_ocrspace(image, config):
+    import base64
+    from io import BytesIO
+
+    import requests
+
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, "PNG")
+    response = requests.post(
+        (config.get("base_url") or "https://api.ocr.space").rstrip("/")
+        + "/parse/image",
+        headers={"apikey": config.get("api_key") or "helloworld"},
+        data={
+            "base64Image": "data:image/png;base64,"
+            + base64.b64encode(buffer.getvalue()).decode(),
+            "language": config.get("model") or "jpn",
+            "OCREngine": "3",
+        },
+        timeout=(10, 60),
+    )
+    response.raise_for_status()
+    payload = response.json() or {}
+    parsed = payload.get("ParsedResults") or []
+    return "\n".join(
+        str(item.get("ParsedText", "")) for item in (parsed or [])
+    ).strip()
+
+
 def _ocr_baidu(image, config):
     import base64
     from io import BytesIO
@@ -496,7 +739,17 @@ def recognize(
 ):
     backend = backend or engine_id
     api_config = api_config or {}
-    if backend in {"api_openai", "api_gemini", "api_baidu", "api_custom"}:
+    if backend in {
+        "api_openai",
+        "api_gemini",
+        "api_baidu",
+        "api_tencent",
+        "api_clova",
+        "api_abbyy",
+        "api_google",
+        "api_ocrspace",
+        "api_custom",
+    }:
         if not api_config:
             raise PipelineError(
                 "MODEL_API_NOT_CONFIGURED",
@@ -509,6 +762,16 @@ def recognize(
             return _ocr_gemini(image, api_config)
         if backend == "api_baidu":
             return _ocr_baidu(image, api_config)
+        if backend == "api_tencent":
+            return _ocr_tencent(image, api_config)
+        if backend == "api_clova":
+            return _ocr_clova(image, api_config)
+        if backend == "api_abbyy":
+            return _ocr_abbyy(image, api_config)
+        if backend == "api_google":
+            return _ocr_google(image, api_config)
+        if backend == "api_ocrspace":
+            return _ocr_ocrspace(image, api_config)
         return _ocr_custom(image, api_config)
     if backend == "winrt":
         return _ocr_winrt(image)

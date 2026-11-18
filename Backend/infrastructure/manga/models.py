@@ -365,6 +365,24 @@ CATALOGUE = [
         advice="Google Gemini 视觉识字；适合多语言混排与手写体",
     ),
     dict(
+        id="api-ocrspace",
+        name="OCR.space（免费额度）",
+        role="ocr",
+        kind="api",
+        backend="api_ocrspace",
+        core=False,
+        advanced=False,
+        requires_api=True,
+        api_provider="ocrspace",
+        langs=["ja", "zh", "ko", "en"],
+        files=[],
+        license="按服务商条款（免费额度）",
+        size_mb=0,
+        url="",
+        source="https://ocr.space/ocrapi",
+        advice="免费额度的通用 OCR；免费测试 Key 填 helloworld，付费 Key 额度更高",
+    ),
+    dict(
         id="api-glm",
         name="GLM-4V OCR",
         role="ocr",
@@ -423,7 +441,7 @@ CATALOGUE = [
         name="腾讯 OCR",
         role="ocr",
         kind="api",
-        backend="api_custom",
+        backend="api_tencent",
         core=False,
         advanced=False,
         requires_api=True,
@@ -434,7 +452,7 @@ CATALOGUE = [
         size_mb=0,
         url="",
         source="https://cloud.tencent.com/product/ocr",
-        advice="腾讯云文字识别；需 SecretId/SecretKey，签名协议由兼容网关接入",
+        advice="腾讯云通用文字识别（GeneralBasicOCR，TC3 签名）；需 SecretId 与 SecretKey",
     ),
     dict(
         id="api-sogou",
@@ -459,7 +477,7 @@ CATALOGUE = [
         name="Naver CLOVA OCR",
         role="ocr",
         kind="api",
-        backend="api_custom",
+        backend="api_clova",
         core=False,
         advanced=False,
         requires_api=True,
@@ -470,14 +488,14 @@ CATALOGUE = [
         size_mb=0,
         url="",
         source="https://www.ncloud.com/product/aiService/ocr",
-        advice="韩文漫画首选；需 Invoke URL 与 Secret Key",
+        advice="Naver CLOVA 通用 OCR（V2）；需 Invoke URL 与 X-OCR-SECRET",
     ),
     dict(
         id="api-abbyy",
         name="ABBYY Cloud OCR",
         role="ocr",
         kind="api",
-        backend="api_custom",
+        backend="api_abbyy",
         core=False,
         advanced=False,
         requires_api=True,
@@ -488,14 +506,14 @@ CATALOGUE = [
         size_mb=0,
         url="",
         source="https://www.abbyy.com/cloud-ocr-sdk",
-        advice="企业级多语言 OCR；需 Application ID 与密码",
+        advice="ABBYY Cloud OCR（processImage → txt）；需 Application ID 与密码",
     ),
     dict(
         id="api-google",
         name="Google Cloud Vision OCR",
         role="ocr",
         kind="api",
-        backend="api_custom",
+        backend="api_google",
         core=False,
         advanced=False,
         requires_api=True,
@@ -506,7 +524,7 @@ CATALOGUE = [
         size_mb=0,
         url="",
         source="https://cloud.google.com/vision/docs/ocr",
-        advice="Google Vision 文字识别；需服务账号密钥",
+        advice="Google Cloud Vision（DOCUMENT_TEXT_DETECTION）；需 API Key",
     ),
     dict(
         id="api-googledrive",
@@ -733,6 +751,65 @@ class ModelRegistry:
                 base or "https://generativelanguage.googleapis.com/v1beta"
             ) + "/models"
             response = requests.get(url, params={"key": key}, timeout=(10, 20))
+        elif backend == "api_tencent":
+            from Backend.infrastructure.manga.engines import _tencent_call
+
+            try:
+                _tencent_call(config, b"", action="GeneralBasicOCR", probe=True)
+                return True, ""
+            except PipelineError as error:
+                return False, error.message
+        elif backend == "api_clova":
+            url = base
+            if not url:
+                return False, "CLOVA 需要填写 Invoke URL（接口地址）"
+            response = requests.post(
+                url,
+                headers={"X-OCR-SECRET": key, "Content-Type": "application/json"},
+                json={"version": "V2", "requestId": "probe", "timestamp": 0, "images": []},
+                timeout=(10, 20),
+            )
+            if response.status_code < 500 and response.status_code != 401:
+                return True, ""
+            return False, f"CLOVA 返回 {response.status_code}，请检查 URL 与 Secret"
+        elif backend == "api_abbyy":
+            if not config.get("appid") or not key:
+                return False, "ABBYY 需要 Application ID 与密码"
+            response = requests.get(
+                (base or "https://ocrsdk.com").rstrip("/") + "/getApplicationInfo",
+                auth=(config.get("appid", ""), key),
+                timeout=(10, 20),
+            )
+            if response.status_code == 200:
+                return True, ""
+            return False, f"ABBYY 鉴权失败（{response.status_code}）"
+        elif backend == "api_google":
+            if not key:
+                return False, "Google Vision 需要 API Key"
+            response = requests.post(
+                (base or "https://vision.googleapis.com").rstrip("/")
+                + "/v1/images:annotate",
+                params={"key": key},
+                json={"requests": []},
+                timeout=(10, 20),
+            )
+            if response.status_code in (200, 400) and "error" not in str(
+                response.text[:200]
+            ).lower():
+                return True, ""
+            if response.status_code == 403:
+                return False, "Google Vision API Key 无效或未启用该 API"
+            return True, ""
+        elif backend == "api_ocrspace":
+            response = requests.post(
+                (base or "https://api.ocr.space").rstrip("/") + "/parse/image",
+                headers={"apikey": key or "helloworld"},
+                data={"base64Image": "data:image/png;base64,iVBORw0KGgo="},
+                timeout=(10, 20),
+            )
+            if response.status_code == 200:
+                return True, ""
+            return False, f"OCR.space 返回 {response.status_code}，请检查 Key"
         elif backend == "api_baidu":
             appid = config.get("appid", "")
             if not appid or not key:
