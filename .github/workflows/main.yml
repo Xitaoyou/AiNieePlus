@@ -48,6 +48,13 @@ jobs:
           python -m pip install -r requirements-frontend.txt -r requirements-backend.txt "pyinstaller>=6.21.0" pytest
           python -m pip install --no-deps -r requirements_no_deps.txt
 
+      - name: Repair onnxruntime wheel
+        # pip 的 wheel 缓存/镜像层偶尔留下损坏的 onnxruntime DLL，
+        # 无缓存重装可保证 _pybind_state 可加载。
+        run: |
+          python -m pip uninstall -y onnxruntime
+          python -m pip install --no-cache-dir "onnxruntime==1.26.0"
+
       - name: Cache offline manga resources
         uses: actions/cache@v4
         with:
