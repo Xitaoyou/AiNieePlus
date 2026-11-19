@@ -2258,7 +2258,14 @@ class MangaPage(QWidget):
         scroll.setMinimumWidth(360)
         scroll.setMaximumWidth(560)
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea {border:none;background:transparent;}")
+        # 只给 QScrollArea 本身设 background:transparent 不够：viewport 是它的
+        # 子 QWidget，会按应用调色板的 Base（永远是白色）自绘底色，暗色主题下
+        # 整条右栏就变成白底，上面白色的标签全看不见。子选择器要把 viewport
+        # 和卡片一起改成透明，露出页面的主题底色。
+        scroll.setStyleSheet(
+            "QScrollArea {border:none;background:transparent;}"
+            "QScrollArea > QWidget > QWidget {background:transparent;}"
+        )
         right_card = SimpleCardWidget()
         right_card.setBorderRadius(12)
         form = QFormLayout(right_card)
