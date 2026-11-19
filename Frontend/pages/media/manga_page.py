@@ -1527,7 +1527,8 @@ class MangaPage(QWidget):
         self.detector.currentIndexChanged.connect(
             lambda: self.set_setting("detector", self.detector.currentData())
         )
-        self.detector.currentIndexChanged.connect(self.apply_detector_defaults)
+        # 用 lambda 吞掉信号附带的 index，否则它会被当成 notify 参数传入
+        self.detector.currentIndexChanged.connect(lambda: self.apply_detector_defaults())
         self.ocr.currentIndexChanged.connect(
             lambda: self.set_setting("ocr", self.ocr.currentData())
         )
