@@ -36,7 +36,6 @@ from PyQt5.QtWidgets import (
     QGraphicsView,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLineEdit,
     QMessageBox,
     QProgressBar,
@@ -56,8 +55,12 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     Action,
+    BodyLabel,
+    ComboBox,
     DropDownPushButton,
     FluentIcon,
+    LineEdit,
+    MessageBoxBase,
     PrimaryPushButton,
     PrimarySplitPushButton,
     RoundMenu,
@@ -126,6 +129,198 @@ def form_update(method):
     return guarded
 
 
+# 与文本翻译页（LanguageSettingsCard）保持同一套语言，只保留后端
+# map_language_code_to_name 能识别的代码，避免出现「未知语言」提示词。
+LANGUAGE_CHOICES = [
+    ("日语", "ja"),
+    ("简中", "zh-CN"),
+    ("繁中", "zh-TW"),
+    ("英语", "en"),
+    ("韩语", "ko"),
+    ("俄语", "ru"),
+    ("德语", "de"),
+    ("法语", "fr"),
+    ("西班牙语", "es"),
+    ("印尼语", "id"),
+    ("越南语", "vi"),
+    ("泰语", "th"),
+]
+
+
+def language_label(code):
+    return next((title for title, value in LANGUAGE_CHOICES if value == code), code)
+
+
+# 弹窗统一配色：qfluentwidgets 只接管它自己那批控件，原生 QLabel / QLineEdit /
+# QPlainTextEdit 在暗色主题下仍是系统浅色，白底黑字混进来就很突兀，所以这里
+# 统一压一层 QSS，并跟随主题切换重刷。
+DIALOG_TONES = {
+    "dark": {
+        "window": "#202020",
+        "surface": "#2b2b2b",
+        "text": "#f0f0f0",
+        "muted": "#c2c2c2",
+        "border": "rgba(255,255,255,0.16)",
+        "header": "#272727",
+    },
+    "light": {
+        "window": "#f7f9fc",
+        "surface": "#ffffff",
+        "text": "#202020",
+        "muted": "#5a5a5a",
+        "border": "rgba(0,0,0,0.12)",
+        "header": "#eef2f8",
+    },
+}
+
+
+def dialog_style(name):
+    tones = DIALOG_TONES["dark" if isDarkTheme() else "light"]
+    return f"""
+QDialog#{name} {{background:{tones["window"]};}}
+QDialog#{name} QLabel {{color:{tones["text"]};background:transparent;}}
+QDialog#{name} QLineEdit, QDialog#{name} QPlainTextEdit, QDialog#{name} QTextEdit {{
+    color:{tones["text"]};background:{tones["surface"]};
+    border:1px solid {tones["border"]};border-radius:6px;padding:4px 8px;
+    selection-background-color:#0f6cbd;selection-color:#ffffff;
+}}
+QDialog#{name} QTableWidget {{
+    color:{tones["text"]};background:{tones["surface"]};
+    alternate-background-color:{tones["window"]};
+    border:1px solid {tones["border"]};border-radius:8px;
+}}
+QDialog#{name} QHeaderView::section {{
+    color:{tones["muted"]};background:{tones["header"]};
+    border:none;border-bottom:1px solid {tones["border"]};
+    padding:4px 6px;font-weight:600;
+}}
+"""
+
+
+def apply_dialog_theme(dialog, name):
+    """给弹窗套统一配色，并在切换明暗主题时自动重刷。"""
+    dialog.setObjectName(name)
+    dialog.setStyleSheet(dialog_style(name))
+
+    def refresh(*_):
+        if sip.isdeleted(dialog):
+            return
+        dialog.setStyleSheet(dialog_style(name))
+
+    qconfig.themeChanged.connect(refresh)
+
+    def detach(*_):
+        try:
+            qconfig.themeChanged.disconnect(refresh)
+        except (TypeError, RuntimeError):
+            pass
+
+    dialog.destroyed.connect(detach)
+    return dialog
+
+
+def dialog_layout(dialog, spacing=12):
+    """弹窗正文布局：统一的边距与行距，避免各弹窗疏密不一。"""
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(20, 18, 20, 16)
+    layout.setSpacing(spacing)
+    return layout
+
+
+def dialog_note(text):
+    """弹窗里的说明文字：自动换行、不撑宽窗口。"""
+    note = QLabel(text)
+    note.setWordWrap(True)
+    note.setMinimumWidth(0)
+    return note
+
+
+class ConfirmBox(MessageBoxBase):
+    """和 AiNiee 其它页面一致的确认框：标题 + 正文 + 可选勾选项 + 按钮。"""
+
+    def __init__(self, parent, title, content, checkbox=None,
+                 yes="确定", no=None, cancel="取消", default_yes=True):
+        super().__init__(parent)
+        self.titleLabel = StrongBodyLabel(title, self.widget)
+        self.contentLabel = BodyLabel(content, self.widget)
+        self.contentLabel.setWordWrap(True)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.contentLabel)
+        self.checkbox = None
+        if checkbox:
+            self.checkbox = QCheckBox(checkbox, self.widget)
+            self.viewLayout.addWidget(self.checkbox)
+        self.yesButton.setText(yes)
+        self.cancelButton.setText(cancel)
+        self.widget.setMaximumWidth(520)
+        self.widget.setMinimumWidth(360)
+        if no:
+            self.noButton = QPushButton(no, self.buttonGroup)
+            self.noButton.clicked.connect(lambda: self.done(QMessageBox.No))
+            self.buttonLayout.insertWidget(
+                self.buttonLayout.indexOf(self.cancelButton), self.noButton, 1
+            )
+        if not default_yes:
+            self.yesButton.setDefault(False)
+
+    # MessageBoxBase 的按钮走 accept()/reject()，而调用点沿用 QMessageBox
+    # 的 Yes/No/Cancel 语义，这里把退出码映射过去。
+    def accept(self):
+        self.done(QMessageBox.Yes)
+
+    def reject(self):
+        self.done(QMessageBox.Cancel)
+
+    def checked(self):
+        return bool(self.checkbox and self.checkbox.isChecked())
+
+
+class InputBox(MessageBoxBase):
+    """取一段文字或从固定选项里挑一项，替代原生 QInputDialog。"""
+
+    def __init__(self, parent, title, prompt, value="", choices=None,
+                 yes="确定", cancel="取消"):
+        super().__init__(parent)
+        self.titleLabel = StrongBodyLabel(title, self.widget)
+        self.promptLabel = BodyLabel(prompt, self.widget)
+        self.promptLabel.setWordWrap(True)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.promptLabel)
+        self.choices = choices
+        if choices is None:
+            self.field = LineEdit(self.widget)
+            self.field.setText(value)
+            self.field.selectAll()
+        else:
+            self.field = ComboBox(self.widget)
+            for item in choices:
+                if isinstance(item, (tuple, list)) and len(item) == 2:
+                    self.field.addItem(item[0], userData=item[1])
+                else:
+                    self.field.addItem(str(item), userData=item)
+            index = self.field.findText(value) if value else 0
+            self.field.setCurrentIndex(max(0, index))
+        self.viewLayout.addWidget(self.field)
+        self.yesButton.setText(yes)
+        self.cancelButton.setText(cancel)
+        self.widget.setMaximumWidth(460)
+        self.widget.setMinimumWidth(340)
+
+    def text(self):
+        if self.choices is None:
+            return self.field.text()
+        return self.field.currentText()
+
+    def data(self):
+        if self.choices is None:
+            return self.field.text()
+        return self.field.currentData()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.field.setFocus()
+
+
 class QComboBox(FluentComboBox):
     """Keep the transport IDs in userData, matching Qt's two-argument addItem."""
 
@@ -190,7 +385,8 @@ class RegionRetryDialog(QDialog):
         )
         self.setWindowTitle(title)
         self.resize(480, 240)
-        layout = QVBoxLayout(self)
+        layout = dialog_layout(self)
+        apply_dialog_theme(self, "mangaRegionRetryDialog")
         field = "source" if kind == "ocr" else "target"
         filled = [r for r in self.regions if r[field].strip()]
         existing = filled[0][field].strip() if filled else ""
@@ -211,15 +407,17 @@ class RegionRetryDialog(QDialog):
             text,
             "可以换一个引擎重试，其他框保持不变。",
         ):
-            label = QLabel(caption)
-            label.setWordWrap(True)
+            label = dialog_note(caption)
             layout.addWidget(label)
         form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
         self.engine = QComboBox()
         self.fill_engines()
         form.addRow("引擎", self.engine)
         layout.addLayout(form)
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addStretch(1)
         cancel = QPushButton("取消")
         cancel.clicked.connect(self.reject)
@@ -276,17 +474,17 @@ class ApiConfigDialog(QDialog):
         self.model = model
         self.provider = model.get("api_provider") or ""
         self.setWindowTitle(f"配置 API · {model['name']}")
-        self.setObjectName("mangaApiConfigDialog")
-        self.resize(520, 260)
-        layout = QVBoxLayout(self)
-        intro = QLabel(
+        self.resize(520, 268)
+        layout = dialog_layout(self)
+        apply_dialog_theme(self, "mangaApiConfigDialog")
+        intro = dialog_note(
             f"{model['advice']}\n\n填写后即可在项目设置里选择该 OCR。"
             "API Key 只保存在本机用户目录。"
         )
-        intro.setWordWrap(True)
-        intro.setMinimumWidth(0)
         layout.addWidget(intro)
         form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
         self.appid = QLineEdit()
         self.appid.setPlaceholderText("百度填 AppID；腾讯填 SecretId；其他可留空")
         self.api_key = QLineEdit()
@@ -304,15 +502,16 @@ class ApiConfigDialog(QDialog):
         form.addRow("接口地址", self.base_url)
         form.addRow("模型名", self.model_name)
         layout.addLayout(form)
-        self.status = QLabel("")
-        self.status.setWordWrap(True)
+        self.status = dialog_note("")
         layout.addWidget(self.status)
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addStretch(1)
         clear = QPushButton("清除配置")
         clear.clicked.connect(lambda: self.save({}))
         save = PrimaryPushButton("保存")
         save.clicked.connect(self.save_from_form)
+        save.setDefault(True)
         buttons.addWidget(clear)
         buttons.addWidget(save)
         layout.addLayout(buttons)
@@ -385,9 +584,7 @@ class ApiConfigDialog(QDialog):
 class ModelDialog(QDialog):
     def __init__(self, page):
         super().__init__(page)
-        self.setObjectName("mangaModelDialog")
-        self.apply_theme()
-        qconfig.themeChanged.connect(self.apply_theme)
+        apply_dialog_theme(self, "mangaModelDialog")
         self.page = page
         self.setWindowTitle("漫画模型中心")
         # 按屏幕可用区收缩：1366×768 的笔记本上 1180×700 会顶出任务栏，
@@ -398,13 +595,12 @@ class ModelDialog(QDialog):
             min(700, max(480, available.height() - 80)),
         )
         self.setMinimumSize(880, 480)
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-        self.intro = QLabel(
+        layout = dialog_layout(self, spacing=10)
+        apply_dialog_theme(self, "mangaModelDialog")
+        self.intro = dialog_note(
             "检测模型与本地 OCR 按需下载；云 API OCR 需在「配置 API」填密钥并验证。"
             "悬停任意行可查看完整说明。"
         )
-        self.intro.setWordWrap(True)
         layout.addWidget(self.intro)
         self.table = QTableWidget()
         self.table.setColumnCount(7)
@@ -438,6 +634,7 @@ class ModelDialog(QDialog):
         self.table.verticalHeader().setDefaultSectionSize(38)
         layout.addWidget(self.table, 1)
         bar = QHBoxLayout()
+        bar.setSpacing(8)
         layout.addLayout(bar)
         self.api_button = QPushButton("配置 API")
         for label, action in [
@@ -452,8 +649,7 @@ class ModelDialog(QDialog):
             bar.addWidget(button)
         self.api_button.clicked.connect(self.configure_api)
         bar.addWidget(self.api_button)
-        self.status = QLabel()
-        self.status.setWordWrap(True)
+        self.status = dialog_note("")
         layout.addWidget(self.status)
         self.refresh()
 
@@ -512,8 +708,7 @@ class ModelDialog(QDialog):
         )
 
     def apply_theme(self, *_):
-        background = "#202020" if isDarkTheme() else "#f7f9fc"
-        self.setStyleSheet(f"QDialog#mangaModelDialog {{background:{background};}}")
+        self.setStyleSheet(dialog_style("mangaModelDialog"))
 
     def refresh(self):
         self.page.background(
@@ -803,15 +998,12 @@ class PunctuationRulesDialog(QDialog):
         self.page = page
         self.baseline = []
         self.setWindowTitle("自动替换标点 · AiNiee 公共译后替换表")
-        self.setObjectName("mangaPunctuationDialog")
-        self.apply_theme()
-        qconfig.themeChanged.connect(self.apply_theme)
+        apply_dialog_theme(self, "mangaPunctuationDialog")
         self.resize(720, 500)
-        layout = QVBoxLayout(self)
-        note = QLabel(
+        layout = dialog_layout(self)
+        note = dialog_note(
             "这里直接编辑公共表“漫画标点替换”。启用后，漫画排版和文本翻译共同使用这些规则；其他公共表不受影响。"
         )
-        note.setWordWrap(True)
         layout.addWidget(note)
         self.enabled = QCheckBox("启用自动替换标点")
         layout.addWidget(self.enabled)
@@ -836,15 +1028,12 @@ class PunctuationRulesDialog(QDialog):
         page.button(buttons, "恢复默认规则", self.restore_defaults)
         buttons.addStretch(1)
         page.button(buttons, "保存到公共表", self.save_rules)
-        self.status = QLabel("正在读取规则…")
+        self.status = dialog_note("正在读取规则…")
         layout.addWidget(self.status)
         page.background(lambda: page.client.request("GET", "/punctuation"), self.loaded)
 
     def apply_theme(self, *_):
-        background = "#202020" if isDarkTheme() else "#f7f9fc"
-        self.setStyleSheet(
-            f"QDialog#mangaPunctuationDialog {{background:{background};}}"
-        )
+        self.setStyleSheet(dialog_style("mangaPunctuationDialog"))
 
     def add_row(self, rule):
         row = self.table.rowCount()
@@ -948,16 +1137,17 @@ class ReplaceDialog(QDialog):
         super().__init__(page)
         self.page = page
         self.setWindowTitle("批量查找替换")
-        self.setObjectName("mangaReplaceDialog")
+        apply_dialog_theme(self, "mangaReplaceDialog")
         self.resize(720, 520)
-        layout = QVBoxLayout(self)
-        note = QLabel(
+        layout = dialog_layout(self)
+        note = dialog_note(
             "按正则表达式批量改写译文或原文。先用「预览」确认命中，再执行替换；"
             "替换结果会作为一次编辑进入撤销栈。"
         )
-        note.setWordWrap(True)
         layout.addWidget(note)
         form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
         self.pattern = QLineEdit()
         self.pattern.setPlaceholderText(r"例如：\s+ 或 ^…$")
         self.replacement = QLineEdit()
@@ -987,10 +1177,10 @@ class ReplaceDialog(QDialog):
         self.table.setWordWrap(False)
         self.table.verticalHeader().setVisible(False)
         layout.addWidget(self.table, 1)
-        self.status = QLabel("输入表达式后点击「预览」")
-        self.status.setWordWrap(True)
+        self.status = dialog_note("输入表达式后点击「预览」")
         layout.addWidget(self.status)
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addStretch(1)
         page.button(buttons, "预览", self.preview)
         apply_button = PrimaryPushButton("全部替换")
@@ -1103,14 +1293,13 @@ class CharactersDialog(QDialog):
         super().__init__(page)
         self.page = page
         self.setWindowTitle("角色设定与跨框上下文")
-        self.setObjectName("mangaCharactersDialog")
+        apply_dialog_theme(self, "mangaCharactersDialog")
         self.resize(860, 520)
-        layout = QVBoxLayout(self)
-        note = QLabel(
+        layout = dialog_layout(self)
+        note = dialog_note(
             "这些设定会随工程保存，翻译时作为「角色设定」一并提交，"
             "让同一人物在不同文字框里的语气保持一致。原名要与原文用字一致才会命中。"
         )
-        note.setWordWrap(True)
         layout.addWidget(note)
         self.table = QTableWidget()
         self.table.setColumnCount(len(self.COLUMNS))
@@ -1131,6 +1320,7 @@ class CharactersDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
         layout.addWidget(self.table, 1)
         options = QHBoxLayout()
+        options.setSpacing(8)
         self.enabled = QCheckBox("翻译时带上角色设定")
         self.enabled.setToolTip("关闭后只按逐框文本翻译，不提交人物表")
         options.addWidget(self.enabled)
@@ -1149,11 +1339,13 @@ class CharactersDialog(QDialog):
         page.button(options, "删除选中行", self.remove_rows)
         layout.addLayout(options)
         buttons = QHBoxLayout()
-        self.status = QLabel("")
+        buttons.setSpacing(8)
+        self.status = dialog_note("")
         buttons.addWidget(self.status, 1)
         page.button(buttons, "取消", self.reject)
         save = PrimaryPushButton("保存设定")
         save.clicked.connect(self.save)
+        save.setDefault(True)
         buttons.addWidget(save)
         layout.addLayout(buttons)
         self.load()
@@ -1249,14 +1441,13 @@ class StylePresetsDialog(QDialog):
         super().__init__(page)
         self.page = page
         self.setWindowTitle("样式预设")
-        self.setObjectName("mangaStylePresetsDialog")
+        apply_dialog_theme(self, "mangaStylePresetsDialog")
         self.resize(560, 460)
-        layout = QVBoxLayout(self)
-        note = QLabel(
+        layout = dialog_layout(self)
+        note = dialog_note(
             "预设只保存字体、字号、颜色与对齐等排版参数，不含文字内容。"
             "套用后会覆盖目标文字框的样式，可用 Ctrl+Z 撤销。"
         )
-        note.setWordWrap(True)
         layout.addWidget(note)
         self.table = QTableWidget()
         self.table.setColumnCount(2)
@@ -1270,7 +1461,8 @@ class StylePresetsDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         layout.addWidget(self.table, 1)
         buttons = QHBoxLayout()
-        self.status = QLabel("")
+        buttons.setSpacing(8)
+        self.status = dialog_note("")
         buttons.addWidget(self.status, 1)
         page.button(buttons, "删除选中", self.remove_current)
         page.button(buttons, "应用到本页", lambda: self.apply(False))
@@ -1375,10 +1567,13 @@ class ImportDialog(QDialog):
     def __init__(self, parent=None, count=0, default_name=""):
         super().__init__(parent)
         self.setWindowTitle("导入漫画")
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.addWidget(QLabel(f"已选择 {count} 个文件，请确认项目信息"))
+        apply_dialog_theme(self, "mangaImportDialog")
+        self.resize(440, 300)
+        layout = dialog_layout(self)
+        layout.addWidget(dialog_note(f"已选择 {count} 个文件，请确认项目信息"))
         form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
         self.name_edit = QLineEdit()
         self.name_edit.setText(default_name)
         self.name_edit.selectAll()
@@ -1393,15 +1588,18 @@ class ImportDialog(QDialog):
         form.addRow("原文语言", self.source_language)
         form.addRow("目标语言", self.target_language)
         layout.addLayout(form)
+        layout.addStretch(1)
         self.append = QCheckBox("追加到当前工程", self)
         self.append.setVisible(bool(getattr(parent, "document", None)))
         layout.addWidget(self.append)
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addStretch(1)
         cancel = QPushButton("取消")
         cancel.clicked.connect(self.reject)
         ok = PrimaryPushButton("开始导入")
         ok.clicked.connect(self.accept)
+        ok.setDefault(True)
         buttons.addWidget(cancel)
         buttons.addWidget(ok)
         layout.addLayout(buttons)
@@ -1534,14 +1732,23 @@ class MangaPage(QWidget):
         )
         self.model_catalogue = []
         self.source_language = QComboBox()
-        self.source_language.addItems(["ja", "zh", "en", "ko"])
+        for title, code in LANGUAGE_CHOICES:
+            self.source_language.addItem(title, code)
         self.target_language = QComboBox()
-        self.target_language.addItems(["zh-CN", "en", "ja", "ko"])
-        self.source_language.currentTextChanged.connect(
-            lambda v: self.set_setting("source_language", v)
+        for title, code in LANGUAGE_CHOICES:
+            self.target_language.addItem(title, code)
+        # 默认日语 → 简中，与导入弹窗保持一致
+        self.source_language.setCurrentIndex(
+            max(0, self.source_language.findData("ja"))
         )
-        self.target_language.currentTextChanged.connect(
-            lambda v: self.set_setting("target_language", v)
+        self.target_language.setCurrentIndex(
+            max(0, self.target_language.findData("zh-CN"))
+        )
+        self.source_language.currentIndexChanged.connect(
+            lambda: self.set_setting("source_language", self.source_language.currentData())
+        )
+        self.target_language.currentIndexChanged.connect(
+            lambda: self.set_setting("target_language", self.target_language.currentData())
         )
         self.panels = QCheckBox("检测分镜并组织阅读顺序")
         self.panels.setChecked(True)
@@ -1977,6 +2184,17 @@ class MangaPage(QWidget):
         self.geometry_done.clicked.connect(self.exit_geometry_mode)
         tools.addWidget(self.geometry_done)
         self.precise_divider = self.divider(tools)
+        # OCR 引擎下拉 + 识别按钮：选中框时识别该框，未选中时识别整页；
+        # 页面上一个框都没有时先问要不要检测。
+        self.tool_ocr = QComboBox()
+        self.tool_ocr.setToolTip("选择 OCR 引擎；识别时只处理当前页或选中的文字框")
+        self.tool_ocr.setFixedWidth(150)
+        self.tool_ocr.currentIndexChanged.connect(self.pick_tool_engine)
+        tools.addWidget(self.tool_ocr)
+        self.tool_recognize = TransparentToolButton(FluentIcon.SEARCH, self)
+        self.tool_recognize.setToolTip("识别：有选中的框就识别框，没有就识别整页")
+        self.tool_recognize.clicked.connect(self.recognize_here)
+        tools.addWidget(self.tool_recognize)
         tools.addWidget(self.precise)
         self.brush = QSpinBox()
         self.brush.setRange(1, 256)
@@ -2262,21 +2480,36 @@ class MangaPage(QWidget):
         )
         return undetected, pending_ocr
 
+    def ask(self, title, message, yes="确定", cancel="取消"):
+        """只有「确定 / 取消」的轻确认，统一走 Fluent 弹窗。"""
+        box = ConfirmBox(self, title, message, yes=yes, cancel=cancel,
+                         default_yes=True)
+        return box.exec()
+
+    def ask_choice(self, title, prompt, choices, value=""):
+        """从固定选项里挑一项，返回 (选中值, 是否确认)。"""
+        box = InputBox(self, title, prompt, value=value, choices=choices)
+        if box.exec() != QMessageBox.Yes:
+            return None, False
+        return box.data(), True
+
+    def ask_text(self, title, prompt, value=""):
+        """取一段文字，返回 (文本, 是否确认)。"""
+        box = InputBox(self, title, prompt, value=value)
+        if box.exec() != QMessageBox.Yes:
+            return "", False
+        return box.text(), True
+
+    def ask_yes_no(self, title, message, yes="是", no="否"):
+        box = ConfirmBox(self, title, message, yes=yes, no=no, cancel="取消")
+        return box.exec()
+
     def confirm_task(self, title, message, checkbox=None):
         """任务确认框：可选内置一次性勾选项。返回 (按钮, 是否勾选)。"""
-        box = QMessageBox(self)
-        box.setWindowTitle(title)
-        box.setText(message)
-        box.setStandardButtons(
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
-        )
-        box.setDefaultButton(QMessageBox.Yes)
-        check = None
-        if checkbox:
-            check = QCheckBox(checkbox, box)
-            box.setCheckBox(check)
+        box = ConfirmBox(self, title, message, checkbox=checkbox,
+                         yes="是", no="否")
         answer = box.exec()
-        return answer, (check.isChecked() if check else False)
+        return answer, box.checked()
 
     def ask_detection(self, scope):
         if not self.document:
@@ -2309,12 +2542,10 @@ class MangaPage(QWidget):
         if scope == 1:
             undetected, pending_ocr = self.pending_counts(1)
             if undetected:
-                answer = QMessageBox.question(
-                    self,
+                answer = self.ask(
                     "补齐检测",
                     f"{undetected} 页没有文字框，要先检测这些页面再读取原文吗？已检测页面保持不变。",
-                    QMessageBox.Yes | QMessageBox.Cancel,
-                    QMessageBox.Yes,
+                    yes="先检测",
                 )
                 if answer != QMessageBox.Yes:
                     return
@@ -2335,12 +2566,10 @@ class MangaPage(QWidget):
             return
         pages = [self.page()]
         if any(not p["regions"] for p in pages if p):
-            answer = QMessageBox.question(
-                self,
+            answer = self.ask(
                 "尚未识别文字框",
                 "当前页没有文字框，要先检测再进行 OCR 吗？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
+                yes="先检测",
             )
             if answer != QMessageBox.Yes:
                 return
@@ -2434,13 +2663,11 @@ class MangaPage(QWidget):
             "regions": "文字框（包括框内原文和译文）",
         }
         if scope is None:
-            scope, ok = QInputDialog.getItem(
-                self,
+            scope, ok = self.ask_choice(
                 "清除" + names[kind],
                 "清除范围",
                 ["选中的框", "当前页", "整部漫画"],
-                1,
-                False,
+                "当前页",
             )
             if not ok:
                 return
@@ -2451,12 +2678,9 @@ class MangaPage(QWidget):
             self.status.setText("请先选中文字框")
             return
         if (
-            QMessageBox.question(
-                self,
+            self.ask_yes_no(
                 "确认清除",
                 f"清除{scope}的{names[kind]}？可以撤销。",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
             )
             != QMessageBox.Yes
         ):
@@ -2494,13 +2718,15 @@ class MangaPage(QWidget):
                 parts.append(f"{undetected} 页未检测")
             if pending_ocr:
                 parts.append(f"{pending_ocr} 页待 OCR")
-            answer = QMessageBox.question(
+            box = ConfirmBox(
                 self,
                 "补齐后翻译",
-                "、".join(parts) + "。是否补齐后翻译整部？\n已处理的文字框、原文和人工修改保持不变。",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                QMessageBox.Yes,
+                "、".join(parts)
+                + "。是否补齐后翻译整部？\n已处理的文字框、原文和人工修改保持不变。",
+                yes="补齐后翻译",
+                no="直接翻译",
             )
+            answer = box.exec()
             if answer == QMessageBox.Cancel:
                 return
             if answer == QMessageBox.Yes:
@@ -3253,6 +3479,11 @@ class MangaPage(QWidget):
         for combo, role, current in (
             (getattr(self, "detector", None), "detect", self.detector.currentData()),
             (getattr(self, "ocr", None), "ocr", self.ocr.currentData()),
+            (
+                getattr(self, "tool_ocr", None),
+                "ocr",
+                self.tool_ocr.currentData() or self.ocr.currentData(),
+            ),
         ):
             if combo is None:
                 continue
@@ -3276,6 +3507,60 @@ class MangaPage(QWidget):
             index = combo.findData(current)
             combo.setCurrentIndex(index if index >= 0 else 0)
             combo.blockSignals(False)
+        if hasattr(self, "tool_ocr") and self.tool_ocr.currentIndex() < 0:
+            self.tool_ocr.blockSignals(True)
+            self.tool_ocr.addItem(self.ocr.currentText(), self.ocr.currentData())
+            self.tool_ocr.blockSignals(False)
+
+    def pick_tool_engine(self, *_):
+        """工具条的引擎下拉直接改工程 OCR，省得再开项目设置。"""
+        engine = self.tool_ocr.currentData()
+        if not engine or not self.document:
+            return
+        self.ocr.blockSignals(True)
+        index = self.ocr.findData(engine)
+        if index < 0:
+            self.ocr.addItem(self.tool_ocr.currentText(), engine)
+            index = self.ocr.findData(engine)
+        self.ocr.setCurrentIndex(max(0, index))
+        self.ocr.blockSignals(False)
+        self.set_setting("ocr", engine)
+
+    def recognize_here(self):
+        """工具条识别按钮：选中框就识别框，没选中就识别当前页。
+
+        当前页还没有任何文字框时先问一句要不要检测，避免 OCR 空跑。
+        """
+        if not self.document:
+            self.status.setText("请先导入漫画或打开工程包")
+            return
+        if self.job_id or self.submitting:
+            self.status.setText("已有任务在执行，请等它结束或先取消当前任务")
+            self.set_status_tone("warn")
+            return
+        page = self.page()
+        if page is None:
+            return
+        engine = self.tool_ocr.currentData()
+        ids = [
+            r["id"]
+            for r in page["regions"]
+            if r["id"] in set(self.canvas.selected_ids() or [])
+        ]
+        if ids:
+            self.run("ocr", scope=0, region_ids=ids, ocr_engine=engine)
+            return
+        if not page["regions"]:
+            answer = self.ask(
+                "尚未识别文字框",
+                "当前页没有文字框，要先检测再进行 OCR 吗？",
+                yes="先检测",
+            )
+            if answer != QMessageBox.Yes:
+                return
+            self.run("recognize", scope=0, ocr_engine=engine)
+            return
+        self.run("ocr", scope=0, ocr_engine=engine)
 
     def sync_project_summary(self):
         if not hasattr(self, "project_summary_button"):
@@ -3284,7 +3569,7 @@ class MangaPage(QWidget):
         ocr = self.ocr.currentText()
         source = self.source_language.currentText()
         target = self.target_language.currentText()
-        summary = f"气泡检测：{detector}   ·   OCR：{ocr}"
+        summary = f"{source} → {target}   ·   {ocr}"
         # 模型名（含语言前缀）可以很长；直接 setText 会让按钮按全文算最小宽度，
         # 把小窗口的右栏挤出屏幕。截断显示，完整内容放 tooltip。
         self.project_summary_button.setMaximumWidth(340)
@@ -3304,22 +3589,43 @@ class MangaPage(QWidget):
         if self.project_dialog is None:
             dialog = QDialog(self)
             dialog.setWindowTitle("项目设置")
-            dialog.setObjectName("mangaProjectDialog")
-            dialog.resize(420, 320)
-            layout = QVBoxLayout(dialog)
-            layout.addWidget(QLabel("模型、语言与识别选项，随本工程保存。"))
+            apply_dialog_theme(dialog, "mangaProjectDialog")
+            dialog.resize(460, 420)
+            layout = dialog_layout(dialog)
+
+            # 语言放最前：导入后最常改的就是「原文语言 → 目标语言」
+            languages = QFormLayout()
+            languages.setHorizontalSpacing(12)
+            languages.setVerticalSpacing(8)
+            self.language_swap = TransparentToolButton(FluentIcon.SYNC)
+            self.language_swap.setToolTip("对调原文语言与目标语言")
+            self.language_swap.clicked.connect(self.swap_languages)
+            direction = QWidget()
+            direction_row = QHBoxLayout(direction)
+            direction_row.setContentsMargins(0, 0, 0, 0)
+            direction_row.setSpacing(6)
+            direction_row.addWidget(self.source_language, 1)
+            direction_row.addWidget(self.language_swap)
+            direction_row.addWidget(self.target_language, 1)
+            languages.addRow("语言", direction)
+            layout.addLayout(languages)
+            layout.addWidget(self.divider_row())
+
             form = QFormLayout()
+            form.setHorizontalSpacing(12)
+            form.setVerticalSpacing(8)
             form.addRow("检测模型", self.detector)
             form.addRow("OCR 模型", self.ocr)
-            form.addRow("原文语言", self.source_language)
-            form.addRow("目标语言", self.target_language)
             form.addRow("检测阈值", self.confidence)
             form.addRow(self.panels)
             form.addRow(self.rtl)
             form.addRow(self.auto_recognize)
             form.addRow("翻译接口", self.provider)
             layout.addLayout(form)
+            layout.addWidget(dialog_note("模型、语言与识别选项随本工程保存。"))
+            layout.addStretch(1)
             buttons = QHBoxLayout()
+            buttons.setSpacing(8)
             buttons.addStretch(1)
             close = QPushButton("完成")
             close.setDefault(True)
@@ -3327,13 +3633,42 @@ class MangaPage(QWidget):
             buttons.addWidget(close)
             layout.addLayout(buttons)
             self.project_dialog = dialog
-        else:
-            for box in (self.detector, self.ocr, self.source_language, self.target_language):
-                pass
         self.project_dialog.show()
         self.project_dialog.raise_()
         self.project_dialog.activateWindow()
         self.status.setText("项目设置已更改会自动保存到当前工程")
+
+    def swap_languages(self):
+        source = self.source_language.currentData()
+        target = self.target_language.currentData()
+        if not source or not target:
+            return
+        self.source_language.blockSignals(True)
+        self.target_language.blockSignals(True)
+        self.source_language.setCurrentIndex(
+            max(0, self.source_language.findData(target))
+        )
+        self.target_language.setCurrentIndex(
+            max(0, self.target_language.findData(source))
+        )
+        self.source_language.blockSignals(False)
+        self.target_language.blockSignals(False)
+        self.set_setting("source_language", self.source_language.currentData())
+        self.set_setting("target_language", self.target_language.currentData())
+        self.sync_project_summary()
+
+    def divider_row(self):
+        """弹窗内的横向分隔线。"""
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Plain)
+        line.setFixedHeight(1)
+        line.setStyleSheet(
+            "background:rgba(255,255,255,0.14);"
+            if isDarkTheme()
+            else "background:rgba(0,0,0,0.12);"
+        )
+        return line
 
     def refresh_providers(self):
         def loaded(result):
@@ -3472,8 +3807,15 @@ class MangaPage(QWidget):
                 index = combo.findData(value)
             combo.setCurrentIndex(max(0, index))
         self.panels.setChecked(s["detect_panels"])
-        self.source_language.setCurrentText(s["source_language"])
-        self.target_language.setCurrentText(s["target_language"])
+        for combo, value in (
+            (self.source_language, s["source_language"]),
+            (self.target_language, s["target_language"]),
+        ):
+            index = combo.findData(value)
+            if index < 0 and value:
+                combo.addItem(value, value)
+                index = combo.findData(value)
+            combo.setCurrentIndex(max(0, index))
         self.confidence.setValue(s["confidence"])
         self.rtl.setChecked(s["right_to_left"])
         self.auto_recognize.setChecked(s["auto_recognize"])
@@ -4305,11 +4647,9 @@ class MangaPage(QWidget):
             self.status.setText("请先选中一个文字框作为预设模板")
             return
         presets = self.document["settings"].get("style_presets") or []
-        name, ok = QInputDialog.getText(
-            self,
+        name, ok = self.ask_text(
             "保存样式预设",
             "预设名称（可写「旁白」「拟声词」等）",
-            QLineEdit.Normal,
             f"预设{len(presets) + 1}",
         )
         name = (name or "").strip()
@@ -4494,12 +4834,10 @@ class MangaPage(QWidget):
             self.loaded(result["workspace"])
             self.refresh_history()
             if not any(p["regions"] for p in self.document["pages"]):
-                answer = QMessageBox.question(
-                    self,
+                answer = self.ask(
                     "开始识别",
                     "导入完成。要立即检测文字框并读取原文吗？",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes,
+                    yes="立即识别",
                 )
                 if answer == QMessageBox.Yes:
                     self.run("recognize", scope=1)
@@ -4936,7 +5274,9 @@ class MangaPage(QWidget):
             "可编辑工程包",
         ]
         modes = ["png", "jpeg", "zip", "cbz", "pdf", "project"]
-        label, ok = QInputDialog.getItem(self, "导出漫画", "格式", labels, 0, False)
+        label, ok = self.ask_choice(
+            "导出漫画", "选择导出格式", labels, labels[0]
+        )
         if not ok:
             return
         folder = QFileDialog.getExistingDirectory(self, "选择新的导出目录")
@@ -5134,12 +5474,10 @@ class MangaPage(QWidget):
 
     def delete_workspace(self, workspace_id, title):
         if (
-            QMessageBox.question(
-                self,
+            self.ask_yes_no(
                 "删除漫画工程",
                 f"永久删除“{title}”的工程、识别结果和缓存？原始图片及导出文件会保留。",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+                yes="删除", no="保留",
             )
             != QMessageBox.Yes
         ):
