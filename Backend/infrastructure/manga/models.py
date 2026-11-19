@@ -22,7 +22,7 @@ CATALOGUE = [
         role="detect",
         kind="local",
         backend="yolo26",
-        default_confidence=0.5,
+        default_confidence=0.25,
         core=True,
         advanced=False,
         requires_api=False,
@@ -60,7 +60,7 @@ CATALOGUE = [
         role="detect",
         kind="local",
         backend="yolo_v8",
-        default_confidence=0.35,
+        default_confidence=0.25,
         core=True,
         advanced=False,
         requires_api=False,
@@ -82,7 +82,7 @@ CATALOGUE = [
         role="detect",
         kind="local",
         backend="yolo_v8",
-        default_confidence=0.35,
+        default_confidence=0.25,
         core=False,
         advanced=False,
         requires_api=False,
@@ -101,7 +101,7 @@ CATALOGUE = [
         role="detect",
         kind="local",
         backend="yolo_v8",
-        default_confidence=0.35,
+        default_confidence=0.25,
         core=False,
         advanced=False,
         requires_api=False,
@@ -120,7 +120,7 @@ CATALOGUE = [
         role="detect",
         kind="local",
         backend="yolo_v8",
-        default_confidence=0.35,
+        default_confidence=0.25,
         core=False,
         advanced=False,
         requires_api=False,
@@ -139,7 +139,7 @@ CATALOGUE = [
         role="detect",
         kind="local",
         backend="yolo_v8",
-        default_confidence=0.35,
+        default_confidence=0.25,
         core=False,
         advanced=False,
         requires_api=False,
@@ -177,7 +177,7 @@ CATALOGUE = [
         role="detect",
         kind="local",
         backend="yolo_v8",
-        default_confidence=0.3,
+        default_confidence=0.25,
         core=False,
         advanced=True,
         requires_api=False,
@@ -227,25 +227,6 @@ CATALOGUE = [
         source="公开漫画检测权重仓库",
         advice="RF-DETR 检测权重；高级/可选，推理适配尚未启用",
         supported=False,
-    ),
-    dict(
-        id="legacy-balloon-yolov4",
-        name="Legacy 气泡 Scaled YOLOv4",
-        role="detect",
-        kind="local",
-        backend="yolov4",
-        default_confidence=0.25,
-        core=False,
-        advanced=False,
-        requires_api=False,
-        api_provider=None,
-        langs=["ja"],
-        files=["model.weights", "model.cfg", "model.json"],
-        license="见权重说明",
-        size_mb=22,
-        url="https://github.com/xulihang/ObjectDetector/releases/download/models/yolo_darknet.zip",
-        source="公开检测权重仓库",
-        advice="Scaled YOLOv4 日漫气泡检测旧版（约 22 MB，按需下载）。置信度偏低，选中后自动用阈值 0.25；适合老排版日漫，新作建议优先 japanese-manga 或 manga-panel",
     ),
     # ================= 本地 OCR（pip 模型 / ONNX 权重）=================
     dict(
@@ -1210,8 +1191,6 @@ class ModelRegistry:
 
     def validate_layout(self, model_id, folder):
         """A generic model.onnx filename is not evidence of model identity."""
-        if model_id == "legacy-balloon-yolov4":
-            return
         from Backend.infrastructure.manga.engines import session
 
         spec = self.spec(model_id)
@@ -1229,7 +1208,7 @@ class ModelRegistry:
                 and len(names) == 2
                 and any("mask" in n.lower() for n in names)
             )
-            or backend in {"layout", "rfdetr", "yolov4"}
+            or backend in {"layout", "rfdetr"}
         )
         if not valid:
             raise PipelineError(

@@ -6,6 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
+import onnx
 import pytest
 from PIL import Image, ImageDraw
 
@@ -269,17 +270,31 @@ def test_malicious_project_cannot_extract_path(workspace, tmp_path):
 
 
 def test_model_hash_detects_corruption(tmp_path):
-    # Legacy import is data only and does not need ONNX installed in this test.
-    folder = tmp_path / "legacy"
+    # 导入时必须校验模型身份：做一个只含 "images" 输入的最小 ONNX，
+    # 权重本身不需要能推理，checksums.json 才是这里要验的对象。
+    folder = tmp_path / "corrupt"
     folder.mkdir()
-    for name in ("model.cfg", "model.weights", "model.json"):
-        (folder / name).write_text("fixture")
+    model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [onnx.helper.make_node("Identity", ["images"], ["output0"])],
+            "probe",
+            [onnx.helper.make_tensor_value_info(
+                "images", onnx.TensorProto.FLOAT, [1, 3, 640, 640]
+            )],
+            [onnx.helper.make_tensor_value_info(
+                "output0", onnx.TensorProto.FLOAT, [1, 3, 640, 640]
+            )],
+        ),
+        opset_imports=[onnx.helper.make_opsetid("", 13)],
+    )
+    (folder / "model.onnx").write_bytes(model.SerializeToString())
+    (folder / "model.json").write_text("{}", encoding="utf-8")
     registry = ModelRegistry(tmp_path / "models", tmp_path / "empty")
-    registry.import_folder("legacy-balloon-yolov4", folder)
-    installed = registry.verify("legacy-balloon-yolov4")
-    (installed / "model.weights").write_text("corrupt")
+    registry.import_folder("japanese-manga", folder)
+    installed = registry.verify("japanese-manga")
+    (installed / "model.onnx").write_text("corrupt")
     with pytest.raises(PipelineError, match="损坏"):
-        registry.verify("legacy-balloon-yolov4")
+        registry.verify("japanese-manga")
 
 
 @pytest.mark.parametrize(

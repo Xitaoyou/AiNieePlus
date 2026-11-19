@@ -55,12 +55,11 @@
 | mangaOCR ONNX | 日文单框识别，支持横竖排 | 完整发布包内置，同一 encoder / decoder / vocab |
 | RapidOCR PP-OCRv6 | 通用中英文识别 | 完整发布包内置，固定 RapidOCR 3.10.0 的三组权重 |
 | LaMa Manga ONNX | 复杂背景修复 | 完整发布包内置；采用公开漫画修复权重 |
-| Legacy YOLOv4 | 旧版气泡检测 | 模型中心导入包含 cfg、weights、json 的模型目录 |
 | Koharu RFDETR 版面分割 | 作者提供的扩展模型 | 模型中心提供来源与用途；本版尚未适配其分割输出，不能用于检测 |
 
 核心模型共约 390 MB（含字体；不含大语言模型）。模型中心提供来源、用途、目录导入、下载、断点续传与 SHA256 校验。下载结果必须与 `source-lock.json` 中的已验证版本一致；不会静默替换模型或回退到在线 OCR。当前推理使用 CPU；GPU 和其余扩展检测架构不在本版适配范围。
 
-Legacy 权重按需随包提供；本机可导入已有权重，导入过程只复制模型文件。
+除上述五个模型外不再随包旧版检测器：用例实测 YOLOv4 旧权重在日漫页面上漏检严重，且额外占 269 MB，已从模型目录与模型中心移除。其它检测器仍可按需从模型中心下载或从本机目录导入。
 
 ## 开发与打包
 
@@ -89,7 +88,7 @@ python -m pytest tests -q
 python -m Tools.smoke_manga --output build/manga-smoke
 ```
 
-真实模型冒烟验证包含 YOLO26、mangaOCR、RapidOCR、LaMa、独立进程和 PNG 导出；`--legacy <模型目录>` 可增加旧版权重加载测试。自动测试中的大语言模型回复是受控数据，不会调用付费接口。
+真实模型冒烟验证包含 YOLO26、mangaOCR、RapidOCR、LaMa、独立进程和 PNG 导出；自动测试中的大语言模型回复是受控数据，不会调用付费接口。
 
 ## 资源来源
 

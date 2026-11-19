@@ -428,7 +428,7 @@ class MangaService:
                             # 否则一个气泡被切成几段分别翻译，译文互不相干。
                             results = own_panels + self.merge_into_bubbles(results)
                         else:
-                            # 整框级模型（legacy / japanese-manga / speech-bubble…）
+                            # 整框级模型（japanese-manga / speech-bubble…）
                             # 有时只报一两个小横条或干脆漏检。只有「明显偏少」
                             # 才补一次行级检测，按 IoU 去重后与自身结果合并。
                             covered = sum(
@@ -875,8 +875,12 @@ class MangaService:
                         r.translation_state = (
                             "cancelled" if context.is_cancelled() else "failed"
                         )
-                        r.translation_error = failures[r.id].get(
-                            "message", "未获得有效译文"
+                        # 取消时共享层会把每条都记成「操作异常中止」，
+                        # 原样显示会让人以为接口坏了。
+                        r.translation_error = (
+                            "任务已取消"
+                            if context.is_cancelled()
+                            else failures[r.id].get("message", "未获得有效译文")
                         )
             self.store.save(latest, latest.revision)
         translated = to_wire(result["model"])
@@ -886,8 +890,13 @@ class MangaService:
             for item in file["items"]
         }
         if result["status"] not in {"success", "partial"}:
-            if result["status"] == "cancelled":
-                self.cancelled(context)
+            # 共享翻译层把「用户取消」也记进 operation_errors，status 因此可能
+            # 落到 failed。漫画侧只看取消标志：用户点了取消就报取消，不要
+            # 提示「请检查原版接口日志」。共享层代码保持原样，避免与上游冲突。
+            if result["status"] == "cancelled" or context.is_cancelled():
+                raise PipelineError(
+                    "CANCELLED", "漫画翻译已取消，本次结果不写入", 409
+                )
             raise PipelineError(
                 "MANGA_TRANSLATION_FAILED",
                 "翻译未完成，请检查原版接口日志",

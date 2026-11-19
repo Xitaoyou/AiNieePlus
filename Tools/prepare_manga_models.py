@@ -1,8 +1,8 @@
 """Prepare redistributable public manga assets before building the full installer.
 
 Usage: python -m Tools.prepare_manga_models --source /path/to/model-folder --download
-No Java binaries are read or copied. The Scaled YOLOv4 legacy detector is bundled
-from its public release; private third-party weights stay out.
+No Java binaries are read or copied; only the public weights listed as core in the
+catalogue ship with the build.
 """
 
 import argparse
@@ -28,33 +28,16 @@ def check(root=ROOT):
     verified = {}
     lock = json.loads((ROOT / "source-lock.json").read_text(encoding="utf-8"))
     for spec in CATALOGUE:
-        if spec["core"]:
-            try:
-                folder = registry.verify(spec["id"])
-                registry.validate_layout(spec["id"], folder)
-                verified[spec["id"]] = str(folder)
-                actual = json.loads((folder / "checksums.json").read_text(encoding="utf-8"))
-                if actual != lock["files"][spec["id"]]:
-                    raise PipelineError(
-                        "MODEL_UNPINNED",
-                        f"Unpinned core model: {spec['id']}",
-                        409,
-                    )
-            except PipelineError as error:
-                if (
-                    spec["id"] != "legacy-balloon-yolov4"
-                    or error.code not in {"MODEL_CORRUPT", "MODEL_UNPINNED"}
-                ):
-                    raise
-                # 本地可能保留用户自备的私有旧版权重；它不参与云端
-                # 发布校验（source-lock 锁的是公开下载版），本地构建照常使用。
-                folder = registry.folder(spec["id"])
-                registry.validate_layout(spec["id"], folder)
-                verified[spec["id"]] = str(folder)
-                print(
-                    "note: legacy-balloon-yolov4 使用本地私有权重；"
-                    "云端构建会下载公开 Scaled YOLOv4"
-                )
+        if not spec["core"]:
+            continue
+        folder = registry.verify(spec["id"])
+        registry.validate_layout(spec["id"], folder)
+        verified[spec["id"]] = str(folder)
+        actual = json.loads((folder / "checksums.json").read_text(encoding="utf-8"))
+        if actual != lock["files"][spec["id"]]:
+            raise PipelineError(
+                "MODEL_UNPINNED", f"Unpinned core model: {spec['id']}", 409
+            )
     font = root / "fonts/NotoSansCJKjp-Regular.otf"
     manifest = json.loads((root / "bundle.json").read_text(encoding="utf-8"))
     if (

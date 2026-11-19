@@ -1519,7 +1519,7 @@ class MangaPage(QWidget):
         self.scope.setCurrentIndex(1)
         self.scope.hide()
         self.detector = QComboBox()
-        for model_id in ("manga-panel", "legacy-balloon-yolov4"):
+        for model_id in ("manga-panel", "japanese-lines"):
             self.detector.addItem(model_id, model_id)
         self.ocr = QComboBox()
         for model_id in ("mangaocr", "rapidocr"):
@@ -1548,7 +1548,7 @@ class MangaPage(QWidget):
         self.confidence = QDoubleSpinBox()
         self.confidence.setRange(0.05, 1)
         self.confidence.setSingleStep(0.05)
-        self.confidence.setValue(0.5)
+        self.confidence.setValue(0.25)
         self.confidence.valueChanged.connect(
             lambda v: self.set_setting("confidence", v)
         )
@@ -3193,17 +3193,35 @@ class MangaPage(QWidget):
 
     def refresh_model_catalogue(self, models=None):
         """缓存模型目录；供模型中心与项目设置的下拉共用。"""
-        if models is None:
-            def loaded(data):
-                self.model_catalogue = data.get("models", [])
 
+        def loaded(data):
+            self.model_catalogue = data.get("models", [])
+            self.fill_model_choices()
+            self.adopt_detector_threshold()
+
+        if models is None:
             self.background(lambda: self.client.request("GET", "/models"), loaded)
             return
         self.model_catalogue = models
         self.fill_model_choices()
+        self.adopt_detector_threshold()
 
-    def apply_detector_defaults(self):
-        """切换检测模型时套用模型建议阈值（旧版权重置信度偏低）。"""
+    def adopt_detector_threshold(self):
+        """目录到手后把阈值同步到当前检测器的建议值。
+
+        只在没有打开工程时执行：工程里保存的阈值是用户自己的选择，
+        打开时不能被目录里的建议值覆盖。
+        """
+        if self.document or self.job_id:
+            return
+        self.apply_detector_defaults(notify=False)
+
+    def apply_detector_defaults(self, notify=True):
+        """切换检测模型时套用该模型的建议阈值。
+
+        取值来自 CATALOGUE 的 default_confidence，与 ImageTrans 同权重
+        model.json 的 confidence / box_thresh 一致。
+        """
         if self.loading_form or not hasattr(self, "confidence"):
             return
         model_id = self.detector.currentData()
@@ -3223,6 +3241,7 @@ class MangaPage(QWidget):
         self.confidence.blockSignals(False)
         if self.document:
             self.set_setting("confidence", float(value))
+        if notify and self.document:
             self.status.setText(
                 f"已切换到「{model['name']}」，检测阈值自动设为 {value}；"
                 "若检出过少可继续调低"

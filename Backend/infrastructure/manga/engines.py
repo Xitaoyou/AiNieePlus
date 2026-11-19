@@ -45,7 +45,14 @@ def _ppocr_det(image, folder, confidence):
     params = json.loads((folder / "model.json").read_text(encoding="utf-8-sig"))
     size_w = int(params.get("width", 640))
     size_h = int(params.get("height", 640))
-    box_thresh = float(params.get("box_thresh", 0.5) or 0.5)
+    # 概率图阈值就是这一支的“置信度”。以界面滑块（confidence）为准，
+    # 各模型的默认值由 CATALOGUE 的 default_confidence 提供，取值对齐
+    # ImageTrans 同权重 model.json 的 box_thresh；这里再回落到 model.json，
+    # 保证单独调用引擎时仍有合理默认。
+    box_thresh = float(confidence)
+    raw_thresh = params.get("box_thresh", params.get("thresh"))
+    if (not confidence) and isinstance(raw_thresh, (int, float)):
+        box_thresh = float(raw_thresh)
     rgb = np.asarray(image.convert("RGB"))
     height, width = rgb.shape[:2]
     scale = min(size_w / width, size_h / height)
@@ -172,40 +179,6 @@ def detect(image, folder, model_id, confidence=0.5):
         return _ppocr_det(image, folder, confidence)
     if backend == "yolo_v8":
         return _yolo_v8(image, folder, confidence)
-    if model_id == "legacy-balloon-yolov4":
-        import json
-
-        params = json.loads((folder / "model.json").read_text(encoding="utf-8-sig"))
-        # OpenCV 的 darknet 导入器按 ANSI 打开文件，路径含非 ASCII 字符时
-        # 会报 "Failed to open NetParameter file"；改用字节缓冲避开路径编码。
-        cfg_bytes = np.frombuffer((folder / "model.cfg").read_bytes(), dtype=np.uint8)
-        weights_bytes = np.frombuffer(
-            (folder / "model.weights").read_bytes(), dtype=np.uint8
-        )
-        net = _cached_engine(
-            f"darknet:{folder}:{params.get('width')}x{params.get('height')}",
-            lambda: cv2.dnn.readNetFromDarknet(cfg_bytes, weights_bytes),
-        )
-        detector = cv2.dnn_DetectionModel(net)
-        detector.setInputParams(
-            size=(params.get("width", 512), params.get("height", 512)),
-            scale=1 / 255,
-            swapRB=params.get("swapRB", True),
-            crop=params.get("crop", False),
-        )
-        classes, scores, boxes = detector.detect(
-            cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
-            confThreshold=confidence,
-            nmsThreshold=0.4,
-        )
-        return [
-            {
-                "rect": [float(x), float(y), float(w), float(h)],
-                "score": float(s),
-                "class_id": 1,
-            }
-            for (x, y, w, h), s in zip(boxes, scores)
-        ]
     if backend in {"layout", "rfdetr"}:
         raise PipelineError(
             "MODEL_UNSUPPORTED",

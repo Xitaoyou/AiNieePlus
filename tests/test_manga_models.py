@@ -47,7 +47,8 @@ def test_catalogue_covers_detection_ocr_api_and_system_models():
     assert {"detect", "ocr"} <= roles
     detect = [s for s in CATALOGUE if s["role"] == "detect"]
     ocr = [s for s in CATALOGUE if s["role"] == "ocr"]
-    assert len(detect) >= 12, "检测模型应覆盖 balloon-dataset 全量"
+    # 移除 Legacy YOLOv4 后剩 11 条：面板、行级、四语种气泡、旧版日漫、布局与 RFDETR。
+    assert len(detect) >= 11, "检测模型应覆盖 balloon-dataset 的可用部分"
     assert len(ocr) >= 20, "OCR 应覆盖本地 + 云 API + 系统"
     api = [s for s in CATALOGUE if s.get("kind") == "api"]
     assert len(api) >= 15
@@ -60,11 +61,17 @@ def test_catalogue_covers_detection_ocr_api_and_system_models():
     assert all(s.get("advanced") for s in heavy), "≥150MB 的非内置模型应标记为高级"
     assert any("japanese-manga" == s["id"] for s in detect)
     assert any(s["id"] == "ppocr-manga-det" for s in detect)
-    # legacy Scaled YOLOv4 属于可选旧版：默认不随包，只提供公开版按需下载
-    legacy = next(s for s in detect if s["id"] == "legacy-balloon-yolov4")
-    assert legacy["core"] is False and legacy["url"], "legacy 应提供按需下载地址"
-    assert legacy["size_mb"] <= 40, "legacy 只保留精简公开版"
-    assert legacy["backend"] == "yolov4"
+    # Legacy Scaled YOLOv4 检出质量差且占 269 MB，已从目录移除；
+    # 阈值统一对齐 ImageTrans 同权重 model.json 的取值。
+    assert "legacy-balloon-yolov4" not in {s["id"] for s in detect}
+    assert {s["backend"] for s in detect} <= {
+        "yolo26",
+        "yolo_v8",
+        "yolo_generic",
+        "rapidocr_det",
+        "layout",
+        "rfdetr",
+    }, "目录里不应再出现 darknet/yolov4 后端"
     for model_id in (
         "japanese-lines",
         "japanese-manga",

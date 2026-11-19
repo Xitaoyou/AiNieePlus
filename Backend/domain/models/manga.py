@@ -172,7 +172,8 @@ class MangaSettings(MangaModel):
     provider_id: str | None = None
     right_to_left: bool = True
     detect_panels: bool = True
-    confidence: float = Field(default=0.5, ge=0.05, le=1)
+    # 与默认检测器 manga-panel 的建议阈值一致；打开旧工程时沿用已存的值。
+    confidence: float = Field(default=0.25, ge=0.05, le=1)
     removal: Literal["precise", "fill", "none"] = "fill"
     auto_recognize: bool = True
     default_style: LetterStyle = Field(default_factory=LetterStyle)

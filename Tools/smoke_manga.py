@@ -16,7 +16,6 @@ from Backend.infrastructure.manga.render import clean_page, resolve_font
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("build/manga-smoke"))
-    parser.add_argument("--legacy", type=Path)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     models = ModelRegistry()
@@ -93,10 +92,6 @@ def main():
         "unmasked_pixels_unchanged": True,
         "export": exported,
     }
-    if args.legacy:
-        report["legacy_boxes"] = len(
-            detect(image, args.legacy, "legacy-balloon-yolov4", 0.15)
-        )
     service.close()
     (args.output / "report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"

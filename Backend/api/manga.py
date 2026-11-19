@@ -105,6 +105,11 @@ def create_manga_router(runtime, authorized, service=None):
     )
     service = service or MangaService()
     runtime.manga = service
+    # 漫画的进程池必须自己关：Runtime.close() 是上游文件，改了会与
+    # 上游自动合并冲突，所以在这边挂退出钩子，只回收自己的池。
+    import atexit
+
+    atexit.register(service.close)
 
     from Backend.application.manga_punctuation import get_state, update_rules
 
