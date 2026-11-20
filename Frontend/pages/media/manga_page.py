@@ -2511,6 +2511,11 @@ class MangaPage(QWidget):
         box = ConfirmBox(self, title, message, yes=yes, no=no, cancel="取消")
         return box.exec()
 
+    def ask_patch(self, title, message, yes="补齐后翻译", no="直接翻译"):
+        """三选一任务框（含「否」按钮），确认文案随任务变化时用。"""
+        box = ConfirmBox(self, title, message, yes=yes, no=no, cancel="取消")
+        return box.exec()
+
     def confirm_task(self, title, message, checkbox=None):
         """任务确认框：可选内置一次性勾选项。返回 (按钮, 是否勾选)。"""
         box = ConfirmBox(self, title, message, checkbox=checkbox,
@@ -2725,15 +2730,11 @@ class MangaPage(QWidget):
                 parts.append(f"{undetected} 页未检测")
             if pending_ocr:
                 parts.append(f"{pending_ocr} 页待 OCR")
-            box = ConfirmBox(
-                self,
+            answer = self.ask_patch(
                 "补齐后翻译",
                 "、".join(parts)
                 + "。是否补齐后翻译整部？\n已处理的文字框、原文和人工修改保持不变。",
-                yes="补齐后翻译",
-                no="直接翻译",
             )
-            answer = box.exec()
             if answer == QMessageBox.Cancel:
                 return
             if answer == QMessageBox.Yes:

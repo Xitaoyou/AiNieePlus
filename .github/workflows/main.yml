@@ -70,9 +70,11 @@ jobs:
         run: python -m Tools.prepare_manga_models --download
 
       - name: Verify manga backend workflows
+        timeout-minutes: 12
         run: python Tools/run_manga_tests.py tests --ignore=tests/test_manga_editor.py -q
 
       - name: Verify manga Fluent editor
+        timeout-minutes: 12
         env:
           QT_QPA_PLATFORM: offscreen
         run: python Tools/run_manga_tests.py tests/test_manga_editor.py -q

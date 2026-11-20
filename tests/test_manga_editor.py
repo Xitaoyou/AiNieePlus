@@ -503,7 +503,7 @@ def test_all_style_defaults_are_inherited_and_clear_actions_are_undoable(monkeyp
     assert editor.region()["style"]["size"] == 42
     assert editor.region()["style"]["bold"]
     assert not editor.region()["style"]["autofit"]
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(editor, "ask_yes_no", lambda *a, **k: QMessageBox.Yes)
     editor.clear_content("target", "整部漫画")
     assert all(not r["target"] for p in editor.document["pages"] for r in p["regions"])
     editor.undo.undo()
@@ -529,7 +529,9 @@ def test_one_click_prompts_and_manual_switch_follow_banner(monkeypatch):
     calls = []
     editor.run = lambda stage, **kw: calls.append((stage, kw))
     editor.document["pages"][0]["regions"] = []
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(editor, "ask", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(editor, "ask_yes_no", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(editor, "ask_patch", lambda *a, **k: QMessageBox.Yes)
     undetected, pending = editor.pending_counts(1)
     assert undetected == 1 and pending == 0
     editor.one_click_translation()
