@@ -1,7 +1,9 @@
 """Native CPU detection and recognition; runs inside this process."""
 
+import json
 import re
 from functools import lru_cache
+from threading import Lock
 
 import numpy as np
 from PIL import Image
@@ -169,24 +171,171 @@ def _yolo_v8(image, folder, confidence):
     return result
 
 
-def detect(image, folder, model_id, confidence=0.5):
+RFDETR_PROFILES = {
+    # (input size, OCR classes, panel class, segmentation output)
+    "manga-with-layout": (1152, (0, 1), 3, True),
+    "manga-with-layout-768": (768, (0,), 3, False),
+    # The upstream JSON also lists class 5; this export has only 5 logits (0–4).
+    "rfdetr": (512, (0, 1, 2), 3, False),
+}
+
+
+def rfdetr_signature(engine, model_id):
+    side, _, _, masks = RFDETR_PROFILES[model_id]
+    inputs = engine.get_inputs()
+    outputs = {out.name: out.shape for out in engine.get_outputs()}
+    return (
+        len(inputs) == 1
+        and inputs[0].shape == [1, 3, side, side]
+        and inputs[0].type == "tensor(float)"
+        and outputs.get("dets") == [1, 300, 4]
+        and outputs.get("labels") == [1, 300, 5]
+        and ("masks" in outputs) == masks
+    )
+
+
+def _rfdetr(image, folder, model_id, confidence):
+    side, text_ids, panel_id, _ = RFDETR_PROFILES[model_id]
+    engine = session(str(folder / "model.onnx"))
+    if not rfdetr_signature(engine, model_id):
+        raise PipelineError("MODEL_OUTPUT_MISMATCH", "RF-DETR 权重与所选版本不匹配", 422)
+    width, height = image.size
+    pixels = np.asarray(
+        image.convert("RGB").resize((side, side), Image.Resampling.BILINEAR),
+        dtype=np.float32,
+    ) / 255.0
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    tensor = np.ascontiguousarray(((pixels - mean) / std).transpose(2, 0, 1)[None])
+    boxes, logits = engine.run(["dets", "labels"], {engine.get_inputs()[0].name: tensor})
+    return _rfdetr_boxes(boxes[0], logits[0], width, height, text_ids, panel_id, confidence)
+
+
+def _rfdetr_boxes(boxes, logits, width, height, text_ids, panel_id, confidence):
     import cv2
 
-    rgb = np.asarray(image.convert("RGB"))
-    height, width = rgb.shape[:2]
+    # Include rejected classes in argmax: a strong balloon or background query
+    # must not become an OCR region just because its text logit is also nonzero.
+    valid = np.isfinite(boxes).all(axis=1) & np.isfinite(logits).all(axis=1)
+    result = []
+    for classes, output_class, threshold in (
+        (text_ids, 1, confidence),
+        ((panel_id,), 0, 0.5),
+    ):
+        rects, scores = [], []
+        for (cx, cy, w, h), row in zip(boxes[valid], logits[valid]):
+            label = int(row.argmax())
+            if label not in classes:
+                continue
+            score = float(1.0 / (1.0 + np.exp(-np.clip(row[label], -80, 80))))
+            if score < threshold:
+                continue
+            x0, x1 = np.clip([(cx - w / 2) * width, (cx + w / 2) * width], 0, width)
+            y0, y1 = np.clip([(cy - h / 2) * height, (cy + h / 2) * height], 0, height)
+            if x1 - x0 >= 4 and y1 - y0 >= 4:
+                rects.append([float(x0), float(y0), float(x1 - x0), float(y1 - y0)])
+                scores.append(score)
+        if rects:
+            for i in np.asarray(cv2.dnn.NMSBoxes(rects, scores, 0.0, 0.65)).flatten():
+                result.append({"rect": rects[i], "score": scores[i], "class_id": output_class})
+    return result
+
+
+def legacy_image_params(folder):
+    """Validate the preprocessing declared by the original ImageTrans profile."""
+    from fractions import Fraction
+
+    try:
+        params = json.loads((folder / "model.json").read_text(encoding="utf-8-sig"))
+        if (
+            params.get("isDarkNet") is True
+            and (params["width"], params["height"]) == (512, 512)
+            and params["mean"] == [0, 0, 0]
+            and Fraction(str(params["scalefactor"])) == Fraction(1, 255)
+            and params["swapRB"] is True
+            and params["crop"] is False
+            and float(params.get("confidence", 0.20)) == 0.20
+        ):
+            return
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, ZeroDivisionError):
+        pass
+    raise PipelineError("MODEL_FILES_MISSING", "请选择 ImageTrans 原版 Legacy 模型配置", 422)
+
+
+_LEGACY_LOCK = Lock()
+
+
+@lru_cache(maxsize=1)
+def _legacy_net(folder):
+    import cv2
+
+    # Byte buffers work when OpenCV's path loader cannot handle Unicode paths.
+    cfg = np.fromfile(folder / "model.cfg", dtype=np.uint8)
+    weights = np.fromfile(folder / "model.weights", dtype=np.uint8)
+    net = cv2.dnn.readNetFromDarknet(cfg, weights)
+    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+    return net
+
+
+def _legacy_boxes(outputs, width, height, confidence):
+    import cv2
+
+    confidence = float(np.float32(confidence))
+    rects, scores = [], []
+    for output in outputs:
+        best = output[:, 5:].max(axis=1)
+        for row, score in zip(output[best > confidence], best[best > confidence]):
+            if not np.isfinite(row[:4]).all() or not np.isfinite(score):
+                continue
+            cx, cy, w, h = (int(float(value) * size)
+                            for value, size in zip(row[:4], (width, height, width, height)))
+            if w > 0 and h > 0:
+                rects.append([cx - w // 2, cy - h // 2, w, h])
+                scores.append(float(score))
+    keep = range(len(rects)) if len(rects) <= 1 else cv2.dnn.NMSBoxes(
+        rects, scores, confidence, 0.50
+    )
+    return [
+        {"rect": rects[i], "score": scores[i], "class_id": 1}
+        for i in np.asarray(keep, dtype=int).flatten()
+    ]
+
+
+def _detect_legacy(image, folder, confidence):
+    import cv2
+
+    legacy_image_params(folder)
+    bgr = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    blob = cv2.dnn.blobFromImage(
+        bgr, 1 / 255, (512, 512), (0, 0, 0), swapRB=True, crop=False
+    )
+    with _LEGACY_LOCK:
+        net = _legacy_net(folder)
+        net.setInput(blob)
+        return _legacy_boxes(
+            net.forward(net.getUnconnectedOutLayersNames()), *image.size, confidence
+        )
+
+
+def detect(image, folder, model_id, confidence=None):
     backend = _model_backend(folder, model_id)
+    if backend == "yolov4":
+        return _detect_legacy(image, folder, 0.20 if confidence is None else confidence)
+    if confidence is None:
+        confidence = 0.5
     if backend == "rapidocr_det":
         return _ppocr_det(image, folder, confidence)
     if backend == "yolo_v8":
         return _yolo_v8(image, folder, confidence)
     if backend in {"layout", "rfdetr"}:
-        raise PipelineError(
-            "MODEL_UNSUPPORTED",
-            "该版面/检测模型的推理尚未适配，请先使用 manga-panel 或 japanese-lines",
-            422,
-        )
+        return _rfdetr(image, folder, model_id, confidence)
     if backend not in {"yolo26", "yolo_generic"}:
         raise PipelineError("MODEL_UNSUPPORTED", "该模型尚未适配检测引擎", 422)
+    import cv2
+
+    rgb = np.asarray(image.convert("RGB"))
+    height, width = rgb.shape[:2]
     engine = session(str(folder / "model.onnx"))
     size_w = size_h = 640
     try:

@@ -598,14 +598,14 @@ class ModelDialog(QDialog):
         layout = dialog_layout(self, spacing=10)
         apply_dialog_theme(self, "mangaModelDialog")
         self.intro = dialog_note(
-            "检测模型与本地 OCR 按需下载；云 API OCR 需在「配置 API」填密钥并验证。"
-            "悬停任意行可查看完整说明。"
+            "检测负责画框，OCR 负责读字。日漫批量检测可先试 Layout 768；"
+            "选中模型可查看完整用途、推荐和安装方式。"
         )
         layout.addWidget(self.intro)
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["模型", "类型", "状态", "大小", "功能说明", "来源许可", "操作"]
+            ["模型", "类型", "状态", "大小", "用途与推荐", "许可", "操作"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -633,6 +633,9 @@ class ModelDialog(QDialog):
                 self.table.setColumnWidth(column, width)
         self.table.verticalHeader().setDefaultSectionSize(38)
         layout.addWidget(self.table, 1)
+        self.model_details = dialog_note("选中模型查看用途和推荐")
+        layout.addWidget(self.model_details)
+        self.table.currentCellChanged.connect(self.update_model_details)
         bar = QHBoxLayout()
         bar.setSpacing(8)
         layout.addLayout(bar)
@@ -716,7 +719,11 @@ class ModelDialog(QDialog):
         )
 
     GROUPS = [
-        ("检测模型（按语言选择）", lambda m: m.get("role") == "detect"),
+        ("漫画版面检测（文字与分镜）", lambda m: m.get("backend") == "layout"),
+        (
+            "检测模型（按语言选择）",
+            lambda m: m.get("role") == "detect" and m.get("backend") != "layout",
+        ),
         (
             "本地 OCR（内置 / ONNX 权重）",
             lambda m: m.get("role") == "ocr" and m.get("kind", "local") == "local",
@@ -760,6 +767,8 @@ class ModelDialog(QDialog):
             lines.append("语言：" + "、".join(model["langs"]))
         lines.append("")
         lines.append("特点：" + (model.get("advice") or "—"))
+        if model.get("recommendation"):
+            lines.append(model["recommendation"])
         if impact:
             lines.append("影响：" + impact)
         if model.get("requires_api") and not model.get("api_ready"):
@@ -821,6 +830,8 @@ class ModelDialog(QDialog):
         return "导入目录", self.import_for
 
     def loaded(self, data):
+        selected = self.selected()
+        selected_id = selected["id"] if selected else None
         models = list(data.get("models", []))
         self.models = models
         self.table.clearSpans()
@@ -830,7 +841,11 @@ class ModelDialog(QDialog):
             items = [m for m in models if predicate(m)]
             if not items:
                 continue
-            items.sort(key=lambda m: (m.get("advanced", False), m.get("name", "")))
+            items.sort(key=lambda m: (
+                m.get("advanced", False),
+                m["id"] != "manga-with-layout-768",
+                m.get("name", ""),
+            ))
             rows.append((title, None))
             rows.extend((None, model) for model in items)
         self.table.setRowCount(len(rows))
@@ -870,7 +885,7 @@ class ModelDialog(QDialog):
                 label,
                 state,
                 size,
-                model["advice"],
+                model.get("recommendation") or model["advice"],
                 model["license"],
             ]
             for col, value in enumerate(values):
@@ -924,10 +939,27 @@ class ModelDialog(QDialog):
             )
         else:
             self.status.setText("")
+        self.page.refresh_model_catalogue(models)
+        if selected_id:
+            for row, model in self.row_models.items():
+                if model["id"] == selected_id:
+                    self.table.setCurrentCell(row, 0)
+                    break
+        self.update_model_details()
 
     def selected(self):
         row = self.table.currentRow()
         return getattr(self, "row_models", {}).get(row)
+
+    def update_model_details(self, *_):
+        model = self.selected()
+        if not model:
+            self.model_details.setText("选中模型查看用途和推荐")
+            return
+        details = model.get("advice") or ""
+        if model.get("recommendation"):
+            details += "\n" + model["recommendation"]
+        self.model_details.setText(details)
 
     def download(self):
         model = self.selected()
@@ -989,7 +1021,11 @@ class ModelDialog(QDialog):
     def link(self):
         model = self.selected()
         if model:
-            QDesktopServices.openUrl(QUrl(model["source"]))
+            url = QUrl(model.get("docs_url") or model.get("source", ""))
+            if url.scheme() in {"http", "https"} and url.host():
+                QDesktopServices.openUrl(url)
+            else:
+                self.status.setText("该模型没有单独的官方说明链接")
 
 
 class PunctuationRulesDialog(QDialog):
@@ -3500,6 +3536,7 @@ class MangaPage(QWidget):
                 for m in catalogue
                 if m.get("role") == role
                 and m.get("installed")
+                and m.get("supported", True)
                 and (
                     m.get("kind", "local") in {"local", "system"}
                     or (m.get("kind") == "api" and m.get("api_ready"))

@@ -14,7 +14,7 @@ from Backend.application.execution_context import ExecutionContext
 from Backend.application.manga_store import MangaStore, atomic_json
 from Backend.application.pipeline_common import PipelineError
 from Backend.domain.models.manga import Rect, Region, identifier
-from Backend.infrastructure.manga.models import ModelRegistry
+from Backend.infrastructure.manga.models import LEGACY_BALLOON_ID, ModelRegistry
 
 
 def _png_bytes(image):
@@ -56,7 +56,8 @@ class MangaService:
     # 主业是切面板的检测器：面板照用，文字框交给行级模型。
     PANEL_ONLY_MODELS = ("manga-panel",)
     # 输出「逐行 / 逐列」小框的检测器，必须先聚合成气泡才能用。
-    LINE_LEVEL_MODELS = ("japanese-lines", "ppocr-manga-det")
+    LINE_LEVEL_MODELS = ("japanese-lines", "ppocr-manga-det", "rfdetr")
+    LAYOUT_MODELS = ("manga-with-layout", "manga-with-layout-768")
     # 行级文字框来源，按可靠性排序
     TEXT_LINE_FALLBACKS = ("japanese-lines", "ppocr-manga-det", "comic-speech-bubble")
 
@@ -426,8 +427,8 @@ class MangaService:
                         elif detector in self.LINE_LEVEL_MODELS:
                             # 用户直接选了行级模型：它报的是逐列小框，必须聚合，
                             # 否则一个气泡被切成几段分别翻译，译文互不相干。
-                            results = own_panels + self.merge_into_bubbles(results)
-                        else:
+                            results = own_panels + self.merge_into_bubbles(own_text)
+                        elif detector != LEGACY_BALLOON_ID:
                             # 整框级模型（japanese-manga / speech-bubble…）
                             # 有时只报一两个小横条或干脆漏检。只有「明显偏少」
                             # 才补一次行级检测，按 IoU 去重后与自身结果合并。
@@ -437,6 +438,10 @@ class MangaService:
                             sparse = len(own_text) < 2 or covered < (
                                 0.015 * page.width * page.height
                             )
+                            if detector in self.LAYOUT_MODELS:
+                                # A page with only one line of dialogue is valid.
+                                # Avoid mixing another detector into a layout result.
+                                sparse = not own_text
                             if sparse:
                                 bubbles = self.detect_text_bubbles(
                                     context, source, document.settings.confidence

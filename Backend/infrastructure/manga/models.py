@@ -13,6 +13,11 @@ from Backend.application.manga_store import atomic_json
 
 
 _SYSTEM_OCR_AVAILABLE = sys.platform == "win32"
+LEGACY_BALLOON_ID = "legacy-balloon-yolov4"
+LEGACY_BALLOON_HASHES = {
+    "model.weights": "7bd9c3b91c6c042efbb88115a9e2c495a167d5622da5b45da83a4cceafb82662",
+    "model.cfg": "1584e064f6ff8c32c63621a2974cc920f0bd4bc670cf87ca36a2dd7b398963c3",
+}
 
 CATALOGUE = [
     # ================= 检测模型（ONNX + model.json 描述文件）=================
@@ -154,10 +159,11 @@ CATALOGUE = [
     ),
     dict(
         id="manga-with-layout",
-        name="Koharu RFDETR 版面分割",
+        name="Manga Layout 1152 · Koharu 精细版",
         role="detect",
         kind="local",
         backend="layout",
+        default_confidence=0.25,
         core=False,
         advanced=False,
         requires_api=False,
@@ -167,9 +173,10 @@ CATALOGUE = [
         license="见原仓库",
         size_mb=78,
         url="https://github.com/xulihang/balloon-dataset/releases/download/models/manga-with-layout.zip",
-        source="公开漫画检测权重仓库",
-        advice="版面/分镜结构分析，供阅读顺序组织；推理适配尚未启用",
-        supported=False,
+        source="balloon-dataset / mayocream Koharu",
+        docs_url="https://github.com/xulihang/balloon-dataset#readme",
+        advice="定位正文、拟声词和分镜；AiNiee 使用检测框，暂不使用该权重的像素蒙版",
+        recommendation="推荐重跑漏小字或拟声词的单页；CPU 耗时较长，整部批量优先用 768 快速版。",
     ),
     dict(
         id="japanese-manga-old",
@@ -192,12 +199,13 @@ CATALOGUE = [
     ),
     dict(
         id="manga-with-layout-768",
-        name="Koharu 版面分割（768px）",
+        name="Manga Layout 768 · Koharu 快速版",
         role="detect",
         kind="local",
         backend="layout",
+        default_confidence=0.25,
         core=False,
-        advanced=True,
+        advanced=False,
         requires_api=False,
         api_provider=None,
         langs=["ja", "zh", "ko", "en"],
@@ -205,28 +213,52 @@ CATALOGUE = [
         license="见原仓库",
         size_mb=66,
         url="https://github.com/xulihang/balloon-dataset/releases/download/models/manga-with-layout-768px.zip",
-        source="公开漫画检测权重仓库",
-        advice="小尺寸版面分割权重；高级/可选，推理适配尚未启用",
-        supported=False,
+        source="balloon-dataset / DevilishDaoSaint Koharu",
+        docs_url="https://huggingface.co/DevilishDaoSaint/koharu-layout-rfdetr",
+        advice="定位正文和分镜；不输出像素蒙版，当前配置跳过拟声词",
+        recommendation="推荐 CPU 批量检测日漫；如果漏掉小字或拟声词，用 1152 精细版复查。",
     ),
     dict(
         id="rfdetr",
-        name="RF-DETR 检测",
+        name="RF-DETR 512 · 日漫单行检测",
         role="detect",
         kind="local",
         backend="rfdetr",
+        default_confidence=0.25,
         core=False,
         advanced=True,
         requires_api=False,
         api_provider=None,
-        langs=["ja", "zh", "ko", "en"],
+        langs=["ja"],
         files=["model.onnx", "model.json"],
         license="见原仓库",
         size_mb=106,
         url="https://github.com/xulihang/balloon-dataset/releases/download/models/rfdetr.zip",
         source="公开漫画检测权重仓库",
-        advice="RF-DETR 检测权重；高级/可选，推理适配尚未启用",
-        supported=False,
+        docs_url="https://github.com/xulihang/ImageTrans-docs/issues/1069",
+        advice="检测日漫和 CG 的文字行，编辑器会尝试把同一气泡里的行合并",
+        recommendation="推荐在气泡模型漏掉狭长竖排文字时对比使用，定位后仍需运行 OCR。",
+    ),
+    dict(
+        id=LEGACY_BALLOON_ID,
+        name="ImageTrans Legacy 气泡（Scaled YOLOv4）",
+        role="detect",
+        kind="local",
+        backend="yolov4",
+        default_confidence=0.20,
+        core=False,
+        advanced=True,
+        requires_api=False,
+        api_provider=None,
+        langs=["ja"],
+        files=["model.weights", "model.cfg", "model.json"],
+        license="见原权重说明",
+        size_mb=281,
+        url="",
+        source="ImageTrans 旧版模型目录",
+        docs_url="https://github.com/xulihang/balloon-dataset#use-the-models-in-imagetrans",
+        advice="仅检测气泡；512×512，默认置信度 0.20，NMS 0.50；需从 ImageTrans 导入原版文件",
+        recommendation="推荐旧版日漫或新版模型误把背景当气泡时对比使用；不检测分镜，且可能漏掉无气泡文字。",
     ),
     # ================= 本地 OCR（pip 模型 / ONNX 权重）=================
     dict(
@@ -1140,9 +1172,9 @@ class ModelRegistry:
             )
         expected = json.loads(manifest.read_text(encoding="utf-8"))
         for name in self.spec(model_id)["files"]:
-            if hashlib.sha256((folder / name).read_bytes()).hexdigest() != expected.get(
-                name
-            ):
+            with (folder / name).open("rb") as stream:
+                actual = hashlib.file_digest(stream, "sha256").hexdigest()
+            if actual != expected.get(name):
                 raise PipelineError(
                     "MODEL_CORRUPT", f"模型文件损坏：{model_id}/{name}", 409
                 )
@@ -1151,7 +1183,7 @@ class ModelRegistry:
     def import_folder(self, model_id, source):
         spec = self.spec(model_id)
         source = Path(source).expanduser().resolve()
-        candidates = [source, source / "models" / model_id]
+        candidates = [source, source / "models" / model_id, source / model_id]
         if model_id == "mangaocr":
             candidates.append(source / "mangaocr")
         source = next(
@@ -1172,9 +1204,14 @@ class ModelRegistry:
             hashes = {}
             for name in spec["files"]:
                 shutil.copyfile(source / name, temporary / name)
-                hashes[name] = hashlib.sha256(
-                    (temporary / name).read_bytes()
-                ).hexdigest()
+                with (temporary / name).open("rb") as stream:
+                    hashes[name] = hashlib.file_digest(stream, "sha256").hexdigest()
+            if model_id == LEGACY_BALLOON_ID and any(
+                hashes[name] != expected for name, expected in LEGACY_BALLOON_HASHES.items()
+            ):
+                raise PipelineError(
+                    "MODEL_VERSION_CHANGED", "所选权重或 CFG 与 ImageTrans 原版 Legacy 不匹配", 422
+                )
             atomic_json(temporary / "checksums.json", hashes)
             target = self.root / model_id
             if target.exists():
@@ -1191,14 +1228,15 @@ class ModelRegistry:
 
     def validate_layout(self, model_id, folder):
         """A generic model.onnx filename is not evidence of model identity."""
-        from Backend.infrastructure.manga.engines import session
+        from Backend.infrastructure.manga.engines import legacy_image_params, rfdetr_signature, session
 
         spec = self.spec(model_id)
         backend = spec.get("backend", "")
-        names = {
-            i.name
-            for i in session(str(folder / spec["files"][0])).get_inputs()
-        }
+        if backend == "yolov4":
+            legacy_image_params(folder)
+            return
+        engine = session(str(folder / spec["files"][0]))
+        names = {i.name for i in engine.get_inputs()}
         valid = (
             (backend in {"yolo26", "yolo_generic", "yolo_v8"} and "images" in names)
             or (backend == "mangaocr" and names == {"pixel_values"})
@@ -1208,7 +1246,7 @@ class ModelRegistry:
                 and len(names) == 2
                 and any("mask" in n.lower() for n in names)
             )
-            or backend in {"layout", "rfdetr"}
+            or (backend in {"layout", "rfdetr"} and rfdetr_signature(engine, model_id))
         )
         if not valid:
             raise PipelineError(
@@ -1314,7 +1352,8 @@ class ModelRegistry:
                             raise PipelineError(
                                 "MODEL_TOO_LARGE", "模型文件超过 1GB 限制", 422
                             )
-                        (temp / name).write_bytes(z.read(member))
+                        with z.open(member) as source, (temp / name).open("wb") as target:
+                            shutil.copyfileobj(source, target, length=1024 * 1024)
             from Backend.core.paths import backend_resource_path
 
             lock_path = backend_resource_path("manga", "source-lock.json")
@@ -1325,10 +1364,9 @@ class ModelRegistry:
                     .get(model_id, {})
                 )
                 for name, expected in locked.items():
-                    if (
-                        hashlib.sha256((temp / name).read_bytes()).hexdigest()
-                        != expected
-                    ):
+                    with (temp / name).open("rb") as stream:
+                        actual = hashlib.file_digest(stream, "sha256").hexdigest()
+                    if actual != expected:
                         raise PipelineError(
                             "MODEL_VERSION_CHANGED",
                             "下载的模型与已验证版本不符，请检查官方更新后手动导入",

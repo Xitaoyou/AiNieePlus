@@ -47,8 +47,7 @@ def test_catalogue_covers_detection_ocr_api_and_system_models():
     assert {"detect", "ocr"} <= roles
     detect = [s for s in CATALOGUE if s["role"] == "detect"]
     ocr = [s for s in CATALOGUE if s["role"] == "ocr"]
-    # 移除 Legacy YOLOv4 后剩 11 条：面板、行级、四语种气泡、旧版日漫、布局与 RFDETR。
-    assert len(detect) >= 11, "检测模型应覆盖 balloon-dataset 的可用部分"
+    assert len(detect) >= 12, "检测模型应覆盖发布权重和 ImageTrans Legacy"
     assert len(ocr) >= 20, "OCR 应覆盖本地 + 云 API + 系统"
     api = [s for s in CATALOGUE if s.get("kind") == "api"]
     assert len(api) >= 15
@@ -61,9 +60,9 @@ def test_catalogue_covers_detection_ocr_api_and_system_models():
     assert all(s.get("advanced") for s in heavy), "≥150MB 的非内置模型应标记为高级"
     assert any("japanese-manga" == s["id"] for s in detect)
     assert any(s["id"] == "ppocr-manga-det" for s in detect)
-    # Legacy Scaled YOLOv4 检出质量差且占 269 MB，已从目录移除；
-    # 阈值统一对齐 ImageTrans 同权重 model.json 的取值。
-    assert "legacy-balloon-yolov4" not in {s["id"] for s in detect}
+    legacy = next(s for s in detect if s["id"] == "legacy-balloon-yolov4")
+    assert legacy["default_confidence"] == 0.20 and not legacy["core"]
+    assert not legacy["url"]
     assert {s["backend"] for s in detect} <= {
         "yolo26",
         "yolo_v8",
@@ -71,7 +70,8 @@ def test_catalogue_covers_detection_ocr_api_and_system_models():
         "rapidocr_det",
         "layout",
         "rfdetr",
-    }, "目录里不应再出现 darknet/yolov4 后端"
+        "yolov4",
+    }
     for model_id in (
         "japanese-lines",
         "japanese-manga",
@@ -130,12 +130,56 @@ def test_download_guards_explain_non_local_kinds(registry):
         "api-openai": "MODEL_API_ONLY",
         "paddleocr": "MODEL_PACKAGE_REQUIRED",
         "winrtocr": "MODEL_SYSTEM_OCR",
-        "manga-with-layout": "MODEL_IMPORT_REQUIRED",
     }
     for model_id, code in cases.items():
         with pytest.raises(PipelineError) as error:
             registry.download(model_id)
         assert error.value.code == code, (model_id, error.value.code)
+
+
+def test_layout_detection_keeps_panels_out_of_ocr():
+    import numpy as np
+
+    from Backend.infrastructure.manga.engines import RFDETR_PROFILES, _rfdetr_boxes
+
+    boxes = np.array([
+        [.25, .25, .20, .10],  # text
+        [.25, .25, .19, .10],  # duplicate text
+        [.75, .25, .20, .10],  # sound effect
+        [.50, .50, .90, .90],  # panel
+        [.50, .50, .60, .60],  # balloon with secondary text score
+    ])
+    logits = np.array([
+        [4, -4, -4, -4, -4],
+        [3, -4, -4, -4, -4],
+        [-4, 4, -4, -4, -4],
+        [-4, -4, -4, 4, -4],
+        [2, -4, 4, -4, -4],
+    ])
+    for model, text_count in (("manga-with-layout", 2), ("manga-with-layout-768", 1)):
+        _, text_classes, panel, _ = RFDETR_PROFILES[model]
+        result = _rfdetr_boxes(boxes, logits, 1000, 500, text_classes, panel, .25)
+        text = [item for item in result if item["class_id"] == 1]
+        assert len(text) == text_count
+        assert text[0]["rect"] == pytest.approx([150, 100, 200, 50])
+        assert sum(item["class_id"] == 0 for item in result) == 1
+
+
+def test_legacy_detection_uses_class_scores_and_original_nms():
+    import numpy as np
+
+    from Backend.infrastructure.manga.engines import _legacy_boxes
+
+    predictions = np.array([
+        [.35, .50, .40, .40, .50, .24, .10],
+        [.50, .50, .40, .40, .40, .10, .23],
+        [.35, .50, .40, .40, .80, .10, .22],
+        [.80, .50, .10, .10, .90, .20, .10],
+    ], dtype=np.float32)
+    results = _legacy_boxes([predictions], 1000, 500, 0.20)
+    # First two overlap at ~0.45 IoU and should both survive 0.50 NMS.
+    # The third is suppressed across classes and the fourth is at the cutoff.
+    assert [d["score"] for d in results] == pytest.approx([.24, .23])
 
 
 def test_recognize_requires_api_configuration():
@@ -177,9 +221,17 @@ def test_model_dialog_groups_and_marks_missing_api(registry):
     app.processEvents()
     # 分组标题行 + 每个模型一行
     assert dialog.table.rowCount() >= len(CATALOGUE)
-    # 第一行是分组标题，第二行起是检测模型
-    assert "检测模型" in dialog.table.item(0, 0).text()
+    # 两款版面模型单独分组，均可下载。
+    assert "漫画版面检测" in dialog.table.item(0, 0).text()
     assert dialog.table.item(1, 1).text().startswith("检测")
+    for row in (1, 2):
+        assert dialog.table.item(row, 0).text().startswith("Manga Layout")
+        assert dialog.table.item(row, 2).text().startswith("需下载")
+    dialog.table.setCurrentCell(1, 0)
+    assert dialog.selected()["id"] == "manga-with-layout-768"
+    assert "CPU 批量" in dialog.model_details.text()
+    dialog.loaded({"models": registry.catalogue()})
+    assert dialog.selected()["id"] == "manga-with-layout-768"
     # tooltip 必须说明功能、影响与体积
     tooltip = dialog.table.item(1, 0).toolTip()
     assert "体积" in tooltip or "MB" in tooltip
@@ -245,6 +297,14 @@ def test_project_settings_only_lists_available_models(registry):
     ids = [editor.detector.itemData(i) for i in range(editor.detector.count())]
     assert ids, "检测模型下拉不应为空"
     assert all(isinstance(item, str) and item for item in ids)
+    assert editor.detector.findData("manga-with-layout") == -1
+    installed = registry.catalogue()
+    for model in installed:
+        if model["id"] == "manga-with-layout":
+            model["installed"] = True
+    editor.refresh_model_catalogue(installed)
+    assert editor.detector.findData("manga-with-layout") >= 0
+    assert editor.detector.findData("manga-with-layout-768") == -1
     editor.cleanup()
     editor.pool.waitForDone(3000)
     app.processEvents()

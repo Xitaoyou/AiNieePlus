@@ -8,6 +8,18 @@
       "model.onnx": "4e355bcdb761a004795984cee1a46cbb677fc6fe1005990ebcf58afa00343920",
       "model.json": "8ba432d80023ffdf7be3caf7cc31a8d726a55ec42968863876d2315896c3febc"
     },
+    "manga-with-layout": {
+      "model.onnx": "5bc96356b28f308a642d810f5bf358109db1eef6d476a85454614f4e915e8ef0",
+      "model.json": "4cf02907020661a2a1be944cf02f6ad881cddfaf29635066e787b044ca028aaf"
+    },
+    "manga-with-layout-768": {
+      "model.onnx": "edeedee329c4c10dc12c4679314efb2ccdc64f6fa986da39a3f178c476009cfe",
+      "model.json": "ff3a0b683ff71c421af884a01a3394fd43130f8b5fd00b22235f4c96e5119a7e"
+    },
+    "rfdetr": {
+      "model.onnx": "fd3ec102d1b15f3a1eafb456c99709ba677bff44c78a88b57278ffbe248809c0",
+      "model.json": "a1e57486b16429c5bc868c7952d02719ba237d8ed0e94352fadf2b2799454ff9"
+    },
     "mangaocr": {
       "encoder.onnx": "5766730bc8e894d8f61f8671f59eabe59afe9d614c05d1fcd52b306f15458459",
       "decoder.onnx": "a9ba33fdf9020b25e227a7b97abab8a5be16872745888eb49b017507efd4b2b5",
