@@ -59,7 +59,9 @@
 
 核心模型共约 390 MB（含字体；不含大语言模型）。模型中心提供来源、用途、目录导入、下载、断点续传与 SHA256 校验。下载结果必须与 `source-lock.json` 中的已验证版本一致；不会静默替换模型或回退到在线 OCR。当前推理使用 CPU；GPU 和其余扩展检测架构不在本版适配范围。
 
-ImageTrans Legacy 气泡（Scaled YOLOv4）作为高级模型按需导入，不随安装包分发。打开「漫画模型中心」，在 Legacy 一行选择「导入目录」，选中本机 ImageTrans 根目录或 `models/legacy-balloon-yolov4`（需包含原版 `model.cfg`、`model.weights`、`model.json`）。然后在项目设置中选择该检测器。默认 512×512、置信度 0.20、NMS 0.50，保留原版预处理，不自动混入其他检测器的结果。它与 `Japanese manga（旧版权重）` 是不同模型；前者只检测气泡，不用于分镜。
+ImageTrans Legacy 气泡（Scaled YOLOv4）不随安装包附带。在「漫画模型中心」可从 AiNieePlus 一键下载，也可选择「导入目录」，选中本机 ImageTrans 根目录或 `models/legacy-balloon-yolov4`（需包含原版 `model.cfg`、`model.weights`、`model.json`）。然后在项目设置中选择该检测器。默认 512×512、置信度 0.20、NMS 0.50，不自动混入其他检测器的结果。它与 Japanese manga 旧版权重是不同模型，只检测气泡，不用于分镜。
+
+下载或导入的可选模型可以在模型中心卸载。卸载只删除 AiNiee 自己保存的副本；不删除 ImageTrans 原文件或随包模型。如果当前工程使用该模型，先切换工程设置。
 
 ## 开发与打包
 

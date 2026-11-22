@@ -162,6 +162,18 @@ def create_manga_router(runtime, authorized, service=None):
             prefer=prefer,
         )
 
+    @router.delete("/models/{model_id}")
+    async def uninstall_model(model_id: str, prefer: str | None = Header(default=None)):
+        def uninstall(_):
+            # This shares the imaging queue with detector jobs. Release any
+            # cached model from the worker before removing its files.
+            service.close()
+            return {"models": service.models.uninstall(model_id)}
+
+        return await run_queued(
+            runtime, "manga/model/uninstall", uninstall, lane="image", prefer=prefer
+        )
+
     @router.get("/model-apis")
     def model_apis():
         return {"configs": service.models.api_configs()}

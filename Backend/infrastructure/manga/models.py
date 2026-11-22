@@ -253,11 +253,11 @@ CATALOGUE = [
         langs=["ja"],
         files=["model.weights", "model.cfg", "model.json"],
         license="见原权重说明",
-        size_mb=281,
-        url="",
-        source="ImageTrans 旧版模型目录",
+        size_mb=261,
+        url="https://github.com/Xitaoyou/AiNieePlus/releases/download/manga-models-v1/legacy-balloon-yolov4.zip",
+        source="ImageTrans Legacy 原版权重 · AiNieePlus 模型发布",
         docs_url="https://github.com/xulihang/balloon-dataset#use-the-models-in-imagetrans",
-        advice="仅检测气泡；512×512，默认置信度 0.20，NMS 0.50；需从 ImageTrans 导入原版文件",
+        advice="仅检测气泡；512×512，默认置信度 0.20，NMS 0.50；可一键下载或从 ImageTrans 导入",
         recommendation="推荐旧版日漫或新版模型误把背景当气泡时对比使用；不检测分镜，且可能漏掉无气泡文字。",
     ),
     # ================= 本地 OCR（pip 模型 / ONNX 权重）=================
@@ -1132,6 +1132,7 @@ class ModelRegistry:
             row.setdefault("requires_api", False)
             row["api_ready"] = True
             row["path"] = ""
+            row["can_uninstall"] = False
             if kind == "api":
                 config = apis.get(spec.get("api_provider"), {})
                 if spec.get("free_key") and not config:
@@ -1156,8 +1157,10 @@ class ModelRegistry:
                 row["installed"] = self.package_available(spec.get("backend"))
             else:
                 try:
-                    row["path"] = str(self.folder(spec["id"]))
+                    folder = self.folder(spec["id"])
+                    row["path"] = str(folder)
                     row["installed"] = True
+                    row["can_uninstall"] = not spec["core"] and folder.parent == self.root
                 except PipelineError:
                     row["installed"] = False
             result.append(row)
@@ -1182,6 +1185,9 @@ class ModelRegistry:
 
     def import_folder(self, model_id, source):
         spec = self.spec(model_id)
+        model_id = spec["id"]
+        if spec.get("kind", "local") != "local" or not spec.get("supported", True):
+            raise PipelineError("MODEL_IMPORT_UNSUPPORTED", "该模型不能从目录导入", 409)
         source = Path(source).expanduser().resolve()
         candidates = [source, source / "models" / model_id, source / model_id]
         if model_id == "mangaocr":
@@ -1226,6 +1232,30 @@ class ModelRegistry:
             if temporary.exists():
                 shutil.rmtree(temporary)
 
+    def _partial_download(self, url):
+        return self.root / ".downloads" / (hashlib.sha256(url.encode()).hexdigest() + ".part")
+
+    def uninstall(self, model_id):
+        spec = self.spec(model_id)
+        if spec.get("kind", "local") != "local" or spec.get("core"):
+            raise PipelineError("MODEL_UNINSTALL_UNSUPPORTED", "内置模型、系统组件和 API 不支持卸载", 409)
+        target = self.root / spec["id"]
+        if (
+            target.resolve() != self.root.resolve() / spec["id"]
+            or target.is_symlink()
+            or (hasattr(target, "is_junction") and target.is_junction())
+        ):
+            raise PipelineError("MODEL_INVALID_DIRECTORY", "不能卸载链接指向的模型目录", 409)
+        if not target.is_dir():
+            raise PipelineError("MANGA_MODEL_MISSING", "没有已安装的模型可卸载", 404)
+        try:
+            shutil.rmtree(target)
+            if spec["url"]:
+                self._partial_download(spec["url"]).unlink(missing_ok=True)
+        except OSError as error:
+            raise PipelineError("MODEL_UNINSTALL_FAILED", "模型文件无法删除，请关闭占用程序后重试", 409) from error
+        return self.catalogue()
+
     def validate_layout(self, model_id, folder):
         """A generic model.onnx filename is not evidence of model identity."""
         from Backend.infrastructure.manga.engines import legacy_image_params, rfdetr_signature, session
@@ -1255,6 +1285,7 @@ class ModelRegistry:
 
     def download(self, model_id, context=None):
         spec = self.spec(model_id)
+        model_id = spec["id"]
         kind = spec.get("kind", "local")
         if kind == "api":
             raise PipelineError(
@@ -1281,10 +1312,12 @@ class ModelRegistry:
         with tempfile.TemporaryDirectory(prefix="ainiee-manga-") as temp:
             temp = Path(temp)
 
+            partials = []
+
             def fetch(url, output):
-                cache = self.root / ".downloads"
-                cache.mkdir(parents=True, exist_ok=True)
-                partial = cache / (hashlib.sha256(url.encode()).hexdigest() + ".part")
+                partial = self._partial_download(url)
+                partial.parent.mkdir(parents=True, exist_ok=True)
+                partials.append(partial)
                 offset = partial.stat().st_size if partial.exists() else 0
                 headers = {"Range": f"bytes={offset}-"} if offset else {}
                 with requests.get(
@@ -1372,4 +1405,10 @@ class ModelRegistry:
                             "下载的模型与已验证版本不符，请检查官方更新后手动导入",
                             409,
                         )
-            return self.import_folder(model_id, temp)
+            catalogue = self.import_folder(model_id, temp)
+            for partial in partials:
+                try:
+                    partial.unlink(missing_ok=True)
+                except OSError:
+                    pass  # installation succeeded; cache cleanup is best effort
+            return catalogue

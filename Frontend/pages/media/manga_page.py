@@ -640,6 +640,9 @@ class ModelDialog(QDialog):
         bar.setSpacing(8)
         layout.addLayout(bar)
         self.api_button = QPushButton("配置 API")
+        self.uninstall_button = QPushButton("卸载模型")
+        self.uninstall_button.setEnabled(False)
+        self.uninstall_button.clicked.connect(self.uninstall_selected)
         for label, action in [
             ("下载", self.download),
             ("导入目录", self.import_model),
@@ -652,6 +655,7 @@ class ModelDialog(QDialog):
             bar.addWidget(button)
         self.api_button.clicked.connect(self.configure_api)
         bar.addWidget(self.api_button)
+        bar.addWidget(self.uninstall_button)
         self.status = dialog_note("")
         layout.addWidget(self.status)
         self.refresh()
@@ -676,18 +680,36 @@ class ModelDialog(QDialog):
         self.refresh()
 
     def download_for(self, model):
-        if not model:
+        if not model or model.get("installed"):
             return
-        self.status.setText(
-            f"正在下载 {model['name']}（{model['size_mb']} MB），可在主页面取消…"
+        self.model_request(
+            "POST", f"/models/{model['id']}/download",
+            f"正在下载 {model['name']}（约 {model['size_mb']} MB）…", "模型已下载并安装",
         )
+
+    def model_request(self, method, path, pending, success, **kwargs):
+        if self.page.job_id or self.page.submitting:
+            self.status.setText("请等待当前任务结束，或先取消")
+            return
+        self.status.setText(pending)
+
+        def failed(message):
+            if not sip.isdeleted(self):
+                self.status.setText(str(message))
+
+        def done(result):
+            if not sip.isdeleted(self):
+                self.loaded(result)
+                self.status.setText(success)
+            else:
+                self.page.refresh_model_catalogue(result["models"])
+
         self.page.start_request(
             lambda: self.page.client.request(
-                "POST",
-                f"/models/{model['id']}/download",
-                headers={"Prefer": "respond-async"},
+                method, path, headers={"Prefer": "respond-async"}, **kwargs
             ),
-            lambda r: self.refresh(),
+            done,
+            on_error=failed,
         )
 
     def import_for(self, model):
@@ -953,6 +975,7 @@ class ModelDialog(QDialog):
 
     def update_model_details(self, *_):
         model = self.selected()
+        self.uninstall_button.setEnabled(bool(model and model.get("can_uninstall")))
         if not model:
             self.model_details.setText("选中模型查看用途和推荐")
             return
@@ -980,33 +1003,51 @@ class ModelDialog(QDialog):
         if not model.get("supported", True) or not model.get("url"):
             self.status.setText("该模型暂不支持一键下载，请从官方来源获取后使用「导入目录」")
             return
-        self.status.setText(f"正在下载 {model['name']}（{model['size_mb']} MB），可在主页面取消…")
-        self.page.start_request(
-            lambda: self.page.client.request(
-                "POST",
-                f"/models/{model['id']}/download",
-                headers={"Prefer": "respond-async"},
-            ),
-            lambda r: self.refresh(),
-        )
+        if model.get("installed"):
+            self.status.setText("该模型已安装")
+            return
+        self.download_for(model)
 
     def import_model(self):
         model = self.selected()
         if not model:
             return
+        if model.get("kind", "local") != "local" or not model.get("supported", True):
+            self.status.setText("请选择支持目录导入的本地模型")
+            return
+        if model.get("installed"):
+            self.status.setText("该模型已安装")
+            return
         folder = QFileDialog.getExistingDirectory(
             self, "选择模型目录"
         )
         if folder:
-            self.page.start_request(
-                lambda: self.page.client.request(
-                    "POST",
-                    f"/models/{model['id']}/import",
-                    json={"path": folder},
-                    headers={"Prefer": "respond-async"},
-                ),
-                lambda r: self.refresh(),
+            self.model_request(
+                "POST", f"/models/{model['id']}/import",
+                "正在导入并校验…", "模型已导入", json={"path": folder},
             )
+
+    def uninstall_selected(self):
+        model = self.selected()
+        if not model or not model.get("can_uninstall"):
+            return
+        settings = (self.page.document or {}).get("settings", {})
+        if (
+            model["role"] == "detect" and settings.get("detector") == model["id"]
+            or model["role"] == "ocr" and settings.get("ocr") == model["id"]
+        ):
+            self.status.setText("当前工程正在使用此模型，请先在项目设置中切换")
+            return
+        if not self.page.ask_yes_no(
+            "卸载漫画模型",
+            f"卸载「{model['name']}」？只删除 AiNiee 中安装的副本。"
+            "其他工程如果使用此模型，需要重新安装或切换。",
+            "卸载", "取消",
+        ):
+            return
+        self.model_request(
+            "DELETE", f"/models/{model['id']}", "正在卸载…", "模型已卸载",
+        )
 
     def verify(self):
         model = self.selected()
@@ -1839,7 +1880,7 @@ class MangaPage(QWidget):
         self.target.textChanged.connect(
             lambda: self.region_value("target", self.target.toPlainText())
         )
-        # 锁定：原文 / 译文 行内小锁；区域锁定只在右键菜单
+        # 原文 / 译文行内锁定。工程里已有的区域锁定字段仍保留。
         self.source_lock = QCheckBox(self)
         self.source_lock.setToolTip(
             "锁定后，整部识别 / OCR 与重做识别会跳过此框，保留此处原文"
@@ -1848,15 +1889,11 @@ class MangaPage(QWidget):
         self.target_lock.setToolTip(
             "锁定后，整部翻译与重做翻译会跳过此框，保留此处译文"
         )
-        self.geometry_lock = QCheckBox(self)
         self.source_lock.toggled.connect(
             lambda v: self.region_value("source_locked", v)
         )
         self.target_lock.toggled.connect(
             lambda v: self.region_value("target_locked", v)
-        )
-        self.geometry_lock.toggled.connect(
-            lambda v: self.region_value("geometry_locked", v)
         )
         self.font = QComboBox()
         self.font.addItem("内置字体", "")
@@ -3531,6 +3568,10 @@ class MangaPage(QWidget):
         ):
             if combo is None:
                 continue
+            tracks_project = bool(self.document and combo in (self.detector, self.ocr))
+            if tracks_project:
+                key = "detector" if role == "detect" else "ocr"
+                current = self.document["settings"].get(key, current)
             entries = [
                 m
                 for m in catalogue
@@ -3543,19 +3584,28 @@ class MangaPage(QWidget):
                     or m.get("kind") == "package"
                 )
             ]
-            if not entries:
+            if not entries and not (tracks_project and current):
                 continue
             combo.blockSignals(True)
             combo.clear()
             for m in entries:
                 combo.addItem(m["name"], m["id"])
             index = combo.findData(current)
+            if index < 0 and current and tracks_project:
+                combo.addItem(self.unavailable_model_label(current), current)
+                index = combo.count() - 1
             combo.setCurrentIndex(index if index >= 0 else 0)
             combo.blockSignals(False)
         if hasattr(self, "tool_ocr") and self.tool_ocr.currentIndex() < 0:
             self.tool_ocr.blockSignals(True)
             self.tool_ocr.addItem(self.ocr.currentText(), self.ocr.currentData())
             self.tool_ocr.blockSignals(False)
+
+    def unavailable_model_label(self, model_id):
+        model = next(
+            (m for m in (self.model_catalogue or []) if m["id"] == model_id), None
+        )
+        return f"{model['name'] if model else model_id}（不可用）"
 
     def pick_tool_engine(self, *_):
         """工具条的引擎下拉直接改工程 OCR，省得再开项目设置。"""
@@ -3848,7 +3898,7 @@ class MangaPage(QWidget):
         ):
             index = combo.findData(value)
             if index < 0 and value:
-                combo.addItem(value, value)
+                combo.addItem(self.unavailable_model_label(value), value)
                 index = combo.findData(value)
             combo.setCurrentIndex(max(0, index))
         self.panels.setChecked(s["detect_panels"])
@@ -4020,7 +4070,6 @@ class MangaPage(QWidget):
             self.rotation,
             self.source_lock,
             self.target_lock,
-            self.geometry_lock,
         ):
             widget.setEnabled(bool(r))
         if not r:
@@ -4041,7 +4090,6 @@ class MangaPage(QWidget):
         for widget, value in (
             (self.source_lock, r["source_locked"]),
             (self.target_lock, r["target_locked"]),
-            (self.geometry_lock, r["geometry_locked"]),
         ):
             widget.blockSignals(True)
             widget.setChecked(value)
@@ -5002,7 +5050,7 @@ class MangaPage(QWidget):
             completed,
         )
 
-    def start_request(self, action, callback):
+    def start_request(self, action, callback, on_error=None):
         if self.job_id or self.submitting:
             self.status.setText("请等待当前任务结束，或先取消")
             return
@@ -5025,6 +5073,7 @@ class MangaPage(QWidget):
             job = result.get("job", {})
             self.job_id = job.get("id") or job.get("job_id")
             self.job_callback = callback
+            self.job_error_callback = on_error
             if self.job_id:
                 self.poll_timer.start()
                 if self.cancel_pending:
@@ -5043,6 +5092,8 @@ class MangaPage(QWidget):
             if error:
                 self.progress_panel.hide()
                 self.status.setText(error)
+                if on_error:
+                    on_error(error)
             else:
                 started(result)
 
@@ -5124,6 +5175,10 @@ class MangaPage(QWidget):
                     self.job_callback(result)
                     if self.dirty:
                         self.save_timer.start()
+                elif job["state"] == "succeeded" and isinstance(result.get("models"), list):
+                    self.job_callback(result)
+                elif getattr(self, "job_error_callback", None):
+                    self.job_error_callback(job.get("error") or state)
                 else:
                     # 状态是 succeeded 但没带回 workspace：以前会拿 {} 直接回调，
                     # completed() 里 result["workspace"] 抛 KeyError 又被兜住，

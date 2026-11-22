@@ -737,6 +737,8 @@ def test_task_progress_is_hidden_without_job_and_after_completion():
     app = QApplication.instance()
     backend = editor.client.backend
     old_request = backend.request
+    received = []
+    models = [{"id": "legacy-balloon-yolov4", "installed": True}]
 
     def request(method, path, **kwargs):
         if path == "/api/jobs/demo":
@@ -744,14 +746,14 @@ def test_task_progress_is_hidden_without_job_and_after_completion():
                 "job": {
                     "state": "succeeded",
                     "progress": {"current": 1, "total": 1},
-                    "result": {},
+                    "result": {"models": models},
                 }
             }
         return old_request(method, path, **kwargs)
 
     backend.request = request
     assert editor.progress_panel.isHidden()
-    editor.start_request(lambda: {"job": {"id": "demo"}}, lambda result: None)
+    editor.start_request(lambda: {"job": {"id": "demo"}}, received.append)
     assert not editor.progress_panel.isHidden()
     editor.pool.waitForDone(3000)
     app.processEvents()
@@ -759,6 +761,7 @@ def test_task_progress_is_hidden_without_job_and_after_completion():
     editor.pool.waitForDone(3000)
     app.processEvents()
     assert editor.progress_panel.isHidden() and editor.job_id is None
+    assert received == [{"models": models}]
     dispose_editor(editor)
 
 

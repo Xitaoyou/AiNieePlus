@@ -62,7 +62,7 @@ def test_catalogue_covers_detection_ocr_api_and_system_models():
     assert any(s["id"] == "ppocr-manga-det" for s in detect)
     legacy = next(s for s in detect if s["id"] == "legacy-balloon-yolov4")
     assert legacy["default_confidence"] == 0.20 and not legacy["core"]
-    assert not legacy["url"]
+    assert legacy["url"].startswith("https://github.com/Xitaoyou/AiNieePlus/releases/download/")
     assert {s["backend"] for s in detect} <= {
         "yolo26",
         "yolo_v8",
@@ -123,6 +123,28 @@ def test_api_state_tracks_configuration(registry, monkeypatch):
     model = api_model("openai")
     assert model["installed"] is False
     assert registry.api_configs().get("openai") is None
+
+
+def test_uninstall_only_removes_an_optional_installed_copy(registry):
+    def install(root, key):
+        folder = root / key
+        folder.mkdir(parents=True)
+        for name in registry.spec(key)["files"]:
+            (folder / name).write_bytes(b"fixture")
+        return folder
+
+    key = "legacy-balloon-yolov4"
+    folder = install(registry.root, key)
+    original = install(registry.root.parent / "ImageTrans", key)
+    builtin = install(registry.bundled, "manga-panel")
+    assert next(m for m in registry.catalogue() if m["id"] == key)["can_uninstall"]
+    result = registry.uninstall(key)
+    row = next(m for m in result if m["id"] == key)
+    assert not row["installed"] and not row["can_uninstall"]
+    assert not folder.exists() and original.exists()
+    with pytest.raises(PipelineError) as error:
+        registry.uninstall("manga-panel")
+    assert error.value.code == "MODEL_UNINSTALL_UNSUPPORTED" and builtin.exists()
 
 
 def test_download_guards_explain_non_local_kinds(registry):
@@ -305,6 +327,11 @@ def test_project_settings_only_lists_available_models(registry):
     editor.refresh_model_catalogue(installed)
     assert editor.detector.findData("manga-with-layout") >= 0
     assert editor.detector.findData("manga-with-layout-768") == -1
+    editor.document = {"settings": {"detector": "manga-with-layout", "ocr": "mangaocr"}}
+    editor.refresh_model_catalogue(registry.catalogue())
+    assert editor.detector.currentData() == "manga-with-layout"
+    assert "不可用" in editor.detector.currentText()
+    editor.document = None
     editor.cleanup()
     editor.pool.waitForDone(3000)
     app.processEvents()

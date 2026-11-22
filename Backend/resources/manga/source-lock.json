@@ -1,6 +1,11 @@
 {
   "schema_version": 1,
   "files": {
+    "legacy-balloon-yolov4": {
+      "model.cfg": "1584e064f6ff8c32c63621a2974cc920f0bd4bc670cf87ca36a2dd7b398963c3",
+      "model.json": "6063aece73979b8ff7fde9d9b1b09cd3719369323648e1d39645770c5cd30ed0",
+      "model.weights": "7bd9c3b91c6c042efbb88115a9e2c495a167d5622da5b45da83a4cceafb82662"
+    },
     "lama": {
       "model.onnx": "4512adab295ee5a5e02ccd1bdf8d45dccbac88309d9cff1532ffd5de876f02a4"
     },
