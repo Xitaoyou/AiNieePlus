@@ -62,6 +62,38 @@ class MangaService:
     TEXT_LINE_FALLBACKS = ("japanese-lines", "ppocr-manga-det", "comic-speech-bubble")
 
     @staticmethod
+    def drop_nested_text_boxes(boxes):
+        """Keep the full text block when a detector also reports its individual lines."""
+        text = []
+        for index, box in enumerate(boxes):
+            if box["class_id"] != 1:
+                continue
+            x, y, w, h = box["rect"]
+            if w > 0 and h > 0:
+                text.append((index, x, y, w, h, w * h, box["score"]))
+        # Sort by area first. In the same bubble, the single-line prediction
+        # often has higher confidence than the box covering the full dialogue.
+        text.sort(key=lambda item: (item[5], item[6]), reverse=True)
+        kept = []
+        dropped = set()
+        for index, x, y, w, h, area, _ in text:
+            cx, cy = x + w / 2, y + h / 2
+            for left, top, right, bottom in kept:
+                if not (left <= cx <= right and top <= cy <= bottom):
+                    continue
+                covered = max(0, min(x + w, right) - max(x, left)) * max(
+                    0, min(y + h, bottom) - max(y, top)
+                )
+                # Use the smaller box's coverage, allowing a few pixels of
+                # detector jitter at the edge. IoU misses narrow nested lines.
+                if covered / area >= 0.92:
+                    dropped.add(index)
+                    break
+            else:
+                kept.append((x, y, x + w, y + h))
+        return [box for index, box in enumerate(boxes) if index not in dropped]
+
+    @staticmethod
     def merge_into_bubbles(boxes):
         """把同一气泡内的逐行/逐列框合并成一个框。
 
@@ -404,6 +436,8 @@ class MangaService:
                             confidence=document.settings.confidence,
                         )
                         detector = document.settings.detector
+                        if detector not in self.PANEL_ONLY_MODELS:
+                            results = self.drop_nested_text_boxes(results)
                         own_text = [d for d in results if d["class_id"] == 1]
                         own_panels = [d for d in results if d["class_id"] == 0]
                         supplemented = False
@@ -457,6 +491,12 @@ class MangaService:
                                 if extra:
                                     results = own_panels + own_text + extra
                                     supplemented = True
+                        if detector not in self.PANEL_ONLY_MODELS and (
+                            supplemented or detector in self.LINE_LEVEL_MODELS
+                        ):
+                            # Merging lines or adding fallback boxes can create
+                            # new containment after the initial detector pass.
+                            results = self.drop_nested_text_boxes(results)
                         if supplemented:
                             report.setdefault("fallback_pages", []).append(
                                 {

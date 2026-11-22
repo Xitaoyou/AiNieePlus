@@ -192,6 +192,38 @@ def test_panel_model_lines_come_from_line_detector(workspace):
     )
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    ["manga-with-layout-768", "japanese-lines", "japanese-manga", "legacy-balloon-yolov4"],
+)
+def test_detection_keeps_the_whole_dialogue_and_separate_neighbors(workspace, model_id):
+    store, doc = workspace
+    doc.settings.detector = model_id
+    doc.settings.detect_panels = True
+    doc = store.save(doc, doc.revision)
+
+    # The wide dialogue box contains two narrow columns, each with a
+    # higher score. One column extends slightly beyond the top edge.
+    detections = [
+        {"class_id": 0, "score": .9, "rect": [0, 0, 240, 160]},
+        {"class_id": 1, "score": .88, "rect": [30, 17, 12, 60]},
+        {"class_id": 1, "score": .85, "rect": [69, 34, 13, 50]},
+        {"class_id": 1, "score": .4, "rect": [28, 20, 55, 68]},
+        {"class_id": 1, "score": .8, "rect": [100, 26, 16, 50]},
+    ]
+    service = StubService(store, StubModels())
+    service.compute = lambda *args, **kw: detections
+    result = service.run(
+        doc.id, "detect", page_ids=[doc.pages[0].id], options={"replace_regions": True}
+    )
+    page = result["workspace"]["pages"][0]
+    assert len(page["panels"]) == 1
+    assert {
+        tuple(r["ocr_rect"][key] for key in ("x", "y", "width", "height"))
+        for r in page["regions"]
+    } == {(28, 20, 55, 68), (100, 26, 16, 50)}
+
+
 def test_translation_adapter_validates_real_intermediate_schema(workspace, monkeypatch):
     from Backend.application import translation_service
     from Backend.core.protocol import to_wire
