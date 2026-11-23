@@ -7,6 +7,14 @@ REPOSITORY = "Xitaoyou/AiNieePlus"
 RELEASES_URL = f"https://github.com/{REPOSITORY}/releases"
 RELEASES_API = f"https://api.github.com/repos/{REPOSITORY}/releases"
 WINDOWS_ASSET = "AiNiee-Beta-Windows-Portable.zip"
+WINDOWS_INSTALLER = "AiNieePlus-Windows-x64-Setup.exe"
+
+
+def windows_installer_mode(root):
+    """Use setup only for a registered installation, not an extracted copy."""
+    return not (root / "portable.txt").exists() and any(
+        path.is_file() for path in root.glob("unins[0-9][0-9][0-9].exe")
+    )
 
 
 def own_download_url(url):

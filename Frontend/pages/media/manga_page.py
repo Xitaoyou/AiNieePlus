@@ -2569,14 +2569,15 @@ class MangaPage(QWidget):
     def ask_choice(self, title, prompt, choices, value=""):
         """从固定选项里挑一项，返回 (选中值, 是否确认)。"""
         box = InputBox(self, title, prompt, value=value, choices=choices)
-        if box.exec() != QMessageBox.Yes:
+        # InputBox uses QDialog.accept(); only ConfirmBox returns QMessageBox.Yes.
+        if box.exec() != QDialog.Accepted:
             return None, False
         return box.data(), True
 
     def ask_text(self, title, prompt, value=""):
         """取一段文字，返回 (文本, 是否确认)。"""
         box = InputBox(self, title, prompt, value=value)
-        if box.exec() != QMessageBox.Yes:
+        if box.exec() != QDialog.Accepted:
             return "", False
         return box.text(), True
 
@@ -2740,22 +2741,25 @@ class MangaPage(QWidget):
         self.select_region("")
 
     def clear_content(self, kind, scope=None):
-        if not self.document:
+        if not self.document or not self.page():
             return
         names = {
             "target": "译文",
             "source": "OCR 原文",
             "regions": "文字框（包括框内原文和译文）",
         }
+        scopes = ["选中的框", "当前页", "整部漫画"]
         if scope is None:
             scope, ok = self.ask_choice(
                 "清除" + names[kind],
                 "清除范围",
-                ["选中的框", "当前页", "整部漫画"],
+                scopes,
                 "当前页",
             )
             if not ok:
                 return
+        if scope not in scopes:
+            return
         ids = set(
             self.canvas.selected_ids() or ([self.selected] if self.selected else [])
         )
@@ -2763,35 +2767,55 @@ class MangaPage(QWidget):
             self.status.setText("请先选中文字框")
             return
         if (
-            self.ask_yes_no(
+            self.ask(
                 "确认清除",
                 f"清除{scope}的{names[kind]}？可以撤销。",
+                yes="删除" if kind == "regions" else "清除",
             )
             != QMessageBox.Yes
         ):
             return
 
+        page_id = self.page_id
+        changed = None
+
         def action():
-            for page in (
-                self.document["pages"] if scope == "整部漫画" else [self.page()]
-            ):
+            nonlocal changed
+            changed = 0
+            for page in self.document["pages"]:
+                if scope != "整部漫画" and page["id"] != page_id:
+                    continue
                 if kind == "regions":
-                    page["regions"] = [
+                    remaining = [
                         r
                         for r in page["regions"]
                         if scope == "选中的框" and r["id"] not in ids
                     ]
+                    changed += len(page["regions"]) - len(remaining)
+                    page["regions"] = remaining
                 else:
                     for region in page["regions"]:
                         if scope == "选中的框" and region["id"] not in ids:
+                            continue
+                        if (
+                            not region[kind]
+                            and region["translation_state"] == "idle"
+                            and not region["translation_error"]
+                        ):
                             continue
                         region[kind] = ""
                         region["translation_state"], region["translation_error"] = (
                             "idle",
                             "",
                         )
-
+                        changed += 1
         self.edit("清除" + names[kind], action)
+        if changed is not None:
+            self.status.setText(
+                f"已处理 {changed} 个文字框（可撤销）"
+                if changed
+                else f"{scope}没有可清除的{names[kind]}"
+            )
 
     def one_click_translation(self):
         if not self.document:

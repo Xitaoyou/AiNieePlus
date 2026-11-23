@@ -22,6 +22,12 @@ struct Args {
     /// Arguments passed unchanged to the updated desktop (including backend URL).
     #[clap(long)]
     restart_arg: Vec<String>,
+    /// PID of the desktop that launched this helper.
+    #[clap(long)]
+    wait_pid: Option<u32>,
+    /// Run a verified Windows setup executable instead of unpacking a ZIP.
+    #[clap(long)]
+    installer: bool,
 }
 
 fn log(dst: &Path, message: &str) {
@@ -59,6 +65,12 @@ fn relaunch_from_temp(args: &Args) -> Result<bool> {
     child.arg(&args.src).arg(&args.dst).current_dir(&args.dst);
     for arg in &args.restart_arg {
         child.arg(format!("--restart-arg={arg}"));
+    }
+    if let Some(pid) = args.wait_pid {
+        child.arg(format!("--wait-pid={pid}"));
+    }
+    if args.installer {
+        child.arg("--installer");
     }
     child.spawn().context("无法启动临时更新器")?;
     Ok(true)
@@ -137,6 +149,65 @@ fn release_files(root: &Path, relative: &Path, files: &mut Vec<PathBuf>) -> Resu
 
 fn is_file_locked(path: &Path) -> bool {
     path.exists() && OpenOptions::new().read(true).write(true).open(path).is_err()
+}
+
+#[cfg(windows)]
+fn wait_for_desktop(pid: Option<u32>) -> Result<()> {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn WaitForSingleObject(handle: *mut c_void, millis: u32) -> u32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    let Some(pid) = pid else { return Ok(()); };
+    let handle = unsafe { OpenProcess(0x00100000, 0, pid) }; // SYNCHRONIZE
+    if handle.is_null() {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(87) { // ERROR_INVALID_PARAMETER: already exited
+            return Ok(());
+        }
+        return Err(error).context("无法等待旧版 AiNiee 退出");
+    }
+    let status = unsafe { WaitForSingleObject(handle, MAX_WAIT_SECONDS as u32 * 1000) };
+    let error = io::Error::last_os_error();
+    unsafe { CloseHandle(handle) };
+    match status {
+        0 => Ok(()),
+        258 => bail!("等待旧版 AiNiee 退出超时"),
+        _ => Err(error).context("等待旧版 AiNiee 退出失败"),
+    }
+}
+
+#[cfg(not(windows))]
+fn wait_for_desktop(_: Option<u32>) -> Result<()> {
+    Ok(())
+}
+
+fn setup_args(dst: &Path) -> Vec<std::ffi::OsString> {
+    let mut directory = std::ffi::OsString::from("/DIR=");
+    directory.push(dst.as_os_str());
+    let mut log_path = std::ffi::OsString::from("/LOG=");
+    log_path.push(dst.join("setup-update.log").as_os_str());
+    vec![
+        "/SP-".into(), "/SILENT".into(), "/SUPPRESSMSGBOXES".into(),
+        "/NORESTART".into(), "/RESTARTEXITCODE=3010".into(), "/NOCLOSEAPPLICATIONS".into(),
+        directory, log_path,
+    ]
+}
+
+fn run_setup(args: &Args) -> Result<()> {
+    wait_for_exit(&args.dst, &[], Duration::from_secs(MAX_WAIT_SECONDS))?;
+    // Inno Setup compares /DIR to its existing install path; pass a normal
+    // Windows path rather than the extended path returned by canonicalize().
+    let dst_text = args.dst.to_string_lossy();
+    let dst = Path::new(dst_text.strip_prefix(r"\\?\").unwrap_or(&dst_text));
+    let result = command(&args.src).args(setup_args(dst)).current_dir(&args.dst)
+        .status().context("无法启动 Windows 安装程序")?;
+    if !result.success() {
+        bail!("安装程序未完成（{result}），请查看 setup-update.log");
+    }
+    Ok(())
 }
 
 fn wait_for_exit(dst: &Path, files: &[PathBuf], timeout: Duration) -> Result<()> {
@@ -247,7 +318,10 @@ fn run(mut args: Args) -> Result<()> {
         return Ok(());
     }
     log(&args.dst, "开始更新前端和后端");
-    if let Err(error) = apply_update(&args) {
+    let installation = wait_for_desktop(args.wait_pid).and_then(|()| {
+        if args.installer { run_setup(&args) } else { apply_update(&args) }
+    });
+    if let Err(error) = installation {
         log(&args.dst, &format!("更新失败，保留更新包，请查看此日志并重试: {error:#}"));
         return Err(error);
     }
@@ -272,8 +346,24 @@ fn main() -> Result<()> {
     let result = run(args);
     if let Err(error) = &result {
         log(&dst, &format!("{error:#}"));
+        #[cfg(windows)]
+        if env::var_os("CI").is_none() {
+            show_failure(&format!("{error:#}\n\n日志：{}", dst.join("update.log").display()));
+        }
     }
     result
+}
+
+#[cfg(windows)]
+fn show_failure(message: &str) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(window: *mut std::ffi::c_void, text: *const u16,
+                       caption: *const u16, flags: u32) -> i32;
+    }
+    let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+    let caption: Vec<u16> = "AiNieePlus 更新失败".encode_utf16().chain(Some(0)).collect();
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x10); }
 }
 
 #[cfg(test)]
@@ -314,5 +404,14 @@ mod tests {
         assert!(find_release(&root).is_err());
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn setup_uses_current_directory_and_disables_system_restart() {
+        let path = Path::new(r"C:\Users\Test User\AiNieePlus");
+        let args = setup_args(path);
+        assert!(args.contains(&"/NORESTART".into()));
+        assert!(args.contains(&"/NOCLOSEAPPLICATIONS".into()));
+        assert!(args.contains(&r"/DIR=C:\Users\Test User\AiNieePlus".into()));
     }
 }

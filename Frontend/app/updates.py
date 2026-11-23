@@ -3,6 +3,7 @@ import platform
 import re
 import sys
 import json
+import hashlib
 import signal
 import threading
 import requests
@@ -21,7 +22,10 @@ from Frontend.core.config import ConfigMixin
 from Frontend.core.paths import downloads_dir, executable_root
 from Frontend.core.resources import frontend_resource_path
 from Frontend.platform.platform_paths import is_macos, is_windows, release_api_url
-from Frontend.services.fork_updates import RELEASES_API, RELEASES_URL, WINDOWS_ASSET, own_download_url, release_version
+from Frontend.services.fork_updates import (
+    RELEASES_API, RELEASES_URL, WINDOWS_ASSET, WINDOWS_INSTALLER,
+    own_download_url, release_version, windows_installer_mode,
+)
 from Frontend.core.log import LogMixin
 from Frontend.components.toast import ToastMixin
 from Frontend.components.dialogs.update_dialog import UpdateMessageBox
@@ -49,6 +53,7 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
         self.latest_version = None
         self.latest_version_url = None
         self.latest_download_url = None
+        self.latest_download_digest = None
         self.download_thread = None
         self.update_dialog = None
         self.signals = UpdaterSignals()
@@ -77,7 +82,12 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
     def _update_file_suffix(self) -> str:
         if is_macos():
             return ".dmg"
+        if self._uses_windows_installer():
+            return ".exe"
         return ".zip"
+
+    def _uses_windows_installer(self):
+        return is_windows() and windows_installer_mode(executable_root())
 
     def _download_paths(self):
         download_root = downloads_dir()
@@ -104,15 +114,18 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
         return ".zip"
 
     def _find_download_url(self, assets: list[dict]) -> str | None:
+        installer = self._uses_windows_installer()
         for asset in assets:
             name = asset.get("name", "")
             valid = (
-                name == WINDOWS_ASSET
+                name == (WINDOWS_INSTALLER if installer else WINDOWS_ASSET)
                 if is_windows()
                 else name.lower().endswith(self._expected_update_asset_suffix())
             )
             url = asset.get("browser_download_url", "")
-            if valid and own_download_url(url):
+            if valid and own_download_url(url) and (
+                not installer or self._asset_digest(asset)
+            ):
                 return url
         return None
 
@@ -170,11 +183,30 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
         self.latest_version = version
         self.latest_version_url = release.get("html_url")
         self.latest_download_url = download_url
+        self.latest_download_digest = next(
+            (self._asset_digest(asset) for asset in release.get("assets", [])
+             if asset.get("browser_download_url") == download_url),
+            None,
+        )
+
+    @staticmethod
+    def _asset_digest(asset):
+        digest = asset.get("digest") or ""
+        return digest[7:].lower() if re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) else None
+
+    def _verify_installer(self, path):
+        if not own_download_url(self.latest_download_url) or not self.latest_download_digest:
+            raise ValueError("无法验证安装包来源，请重新检查更新")
+        with open(path, "rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if digest != self.latest_download_digest:
+            raise ValueError("安装包校验失败，请重新下载更新")
 
     def check_for_updates(self):
         """Only compatible releases from our own fork, including CI prereleases."""
         self.check_error = None
         self.latest_download_url = None
+        self.latest_download_digest = None
         try:
             release, version, url, status = self._find_compatible_update_release()
             if status is not None:
@@ -453,7 +485,10 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
         left_buttons_layout.setSpacing(8)
 
         # 更新按钮
-        self.update_button = PrimaryPushButton(self.tra("开始更新"), button_card)
+        update_label = "下载并安装" if is_windows() else "开始更新"
+        self.update_button = PrimaryPushButton(self.tra(update_label), button_card)
+        if is_windows():
+            self.update_button.setToolTip("下载完成后，AiNieePlus 将保存工程、关闭并安装更新")
         self.update_button.clicked.connect(self._start_update)
         # 取消按钮
         self.cancel_button = PushButton(self.tra("取消"), button_card)
@@ -789,6 +824,15 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
                 raise ValueError(self.tra("无法确认更新包大小，已中止以保证完整性"))
 
             # 下载完成，将临时文件重命名为正式文件
+            if self._uses_windows_installer():
+                try:
+                    if url != self.latest_download_url:
+                        raise ValueError("更新包已变化，请重新检查更新")
+                    self._verify_installer(temp_filename)
+                except ValueError:
+                    temp_path.unlink(missing_ok=True)
+                    info_path.unlink(missing_ok=True)
+                    raise
             download_info["status"] = "completed"
             with open(download_info_file, 'w') as info_file:
                 json.dump(download_info, info_file)
@@ -824,6 +868,11 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
         if self.update_dialog:
             self.update_dialog.accept()
             self.update_dialog = None
+
+        if is_windows():
+            # The Windows button explicitly says Download and Install.
+            self._run_updater(filename)
+            return
 
         # 然后显示确认对话框
         msg_box = MessageBox(
@@ -980,8 +1029,18 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
                 raise FileNotFoundError(update_file)
 
             if is_windows():
-                from Frontend.services.update_package import validate_windows_update
-                validate_windows_update(update_file)
+                installer = self._uses_windows_installer()
+                if installer:
+                    try:
+                        self._verify_installer(update_file)
+                    except ValueError:
+                        # Remove the cache metadata so a damaged file is not
+                        # offered again on the next update check.
+                        self._download_paths()[2].unlink(missing_ok=True)
+                        raise
+                else:
+                    from Frontend.services.update_package import validate_windows_update
+                    validate_windows_update(update_file)
                 if not os.path.isfile(os.path.join(current_dir, "AiNiee.exe")):
                     raise RuntimeError(self.tra("安装目录缺少 AiNiee.exe，请手动更新"))
                 # Fail before shutdown if staging/backups cannot be created here.
@@ -1017,12 +1076,14 @@ class VersionManager(ConfigMixin, LogMixin, ToastMixin, Base):
                 # If shutdown fails, leave the UI and downloaded update intact.
                 if local_backend:
                     client.shutdown()
-                subprocess.Popen(
-                    [updater_path, os.path.abspath(update_file), current_dir,
-                     "--restart-arg=--backend-url", f"--restart-arg={client.url}"],
-                    cwd=current_dir,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
+                args = [updater_path, os.path.abspath(update_file), current_dir,
+                        f"--wait-pid={os.getpid()}", "--restart-arg=--backend-url",
+                        f"--restart-arg={client.url}"]
+                if installer:
+                    args.append("--installer")
+                from Frontend.platform.backend_process import _child_library_path
+                with _child_library_path():
+                    subprocess.Popen(args, cwd=current_dir, creationflags=subprocess.CREATE_NO_WINDOW)
 
                 # Keep the archive and metadata until installation succeeds.
                 # 退出当前程序

@@ -503,7 +503,7 @@ def test_all_style_defaults_are_inherited_and_clear_actions_are_undoable(monkeyp
     assert editor.region()["style"]["size"] == 42
     assert editor.region()["style"]["bold"]
     assert not editor.region()["style"]["autofit"]
-    monkeypatch.setattr(editor, "ask_yes_no", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(editor, "ask", lambda *a, **k: QMessageBox.Yes)
     editor.clear_content("target", "整部漫画")
     assert all(not r["target"] for p in editor.document["pages"] for r in p["regions"])
     editor.undo.undo()
@@ -519,6 +519,59 @@ def test_all_style_defaults_are_inherited_and_clear_actions_are_undoable(monkeyp
     assert len(editor.page()["regions"]) == count
     editor.clear_selection()
     assert not editor.selected
+    dispose_editor(editor)
+
+
+@pytest.mark.parametrize("kind", ["target", "source", "regions"])
+@pytest.mark.parametrize("scope", ["选中的框", "当前页", "整部漫画"])
+def test_clear_menu_accepts_real_dialogs_and_respects_scope(monkeypatch, kind, scope):
+    from PyQt5.QtCore import QTimer
+
+    from Backend.domain.models.manga import Region
+    from Frontend.pages.media.manga_page import ConfirmBox, InputBox
+
+    def click_on_exec(dialog_type, select_scope=False):
+        original_exec = dialog_type.exec
+
+        def execute(box):
+            if select_scope:
+                box.field.setCurrentIndex(box.field.findText(scope))
+            QTimer.singleShot(0, box.yesButton.click)
+            return original_exec(box)
+
+        monkeypatch.setattr(dialog_type, "exec", execute)
+
+    click_on_exec(InputBox, select_scope=True)
+    click_on_exec(ConfirmBox)
+    editor = make_editor_for_actions()
+    editor.page()["regions"].append(
+        Region(source="another", target="other", order=1).model_dump()
+    )
+    before = deepcopy(editor.document["pages"])
+    selected = editor.selected
+    editor.clear_content(kind)
+
+    for index, (original, page) in enumerate(zip(before, editor.document["pages"])):
+        affected = {
+            r["id"]
+            for r in original["regions"]
+            if scope == "整部漫画"
+            or (index == 0 and (scope == "当前页" or r["id"] == selected))
+        }
+        expected = deepcopy(original["regions"])
+        if kind == "regions":
+            expected = [r for r in expected if r["id"] not in affected]
+        else:
+            for r in expected:
+                if r["id"] in affected:
+                    r[kind] = ""
+        actual = page["regions"]
+        assert [
+            (r["id"], r["source"], r["target"]) for r in actual
+        ] == [(r["id"], r["source"], r["target"]) for r in expected]
+    assert "已处理" in editor.status.text()
+    editor.undo.undo()
+    assert editor.document["pages"] == before
     dispose_editor(editor)
 
 
@@ -730,6 +783,56 @@ def test_updater_uses_our_prereleases_and_rejects_other_repository_assets(monkey
         "https://github.com/NEKOparapa/AiNiee/releases/download/new/other.zip"
     )
     assert manager.check_for_updates() == (False, "17")
+
+
+def test_windows_installer_handoff_verifies_package_and_waits_for_desktop(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+    from hashlib import sha256
+    from types import SimpleNamespace
+    import subprocess
+
+    from Frontend.app import updates
+    from Frontend.platform import backend_process
+    from Frontend.services.fork_updates import WINDOWS_INSTALLER, WINDOWS_ASSET
+
+    monkeypatch.setattr(updates, "is_windows", lambda: True)
+    monkeypatch.setattr(updates, "is_macos", lambda: False)
+    monkeypatch.setattr(updates, "executable_root", lambda: tmp_path)
+    monkeypatch.setattr(updates, "downloads_dir", lambda: tmp_path)
+    monkeypatch.setattr(updates.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(backend_process, "_child_library_path", nullcontext)
+    monkeypatch.setattr(updates, "frontend_resource_path", lambda *args: tmp_path / "updater.exe")
+    for name in ("AiNiee.exe", "unins000.exe", "updater.exe"):
+        (tmp_path / name).touch()
+    events = []
+    monkeypatch.setattr(subprocess, "Popen", lambda args, **kw: events.append(args))
+    manager = updates.VersionManager(version="AiNieePlus 17")
+    monkeypatch.setattr(manager, "config_backend", lambda: SimpleNamespace(
+        url="http://127.0.0.1:33888", shutdown=lambda: events.append("shutdown")
+    ))
+    monkeypatch.setattr(manager, "_exit_for_update", lambda: events.append("exit"))
+    prefix = "https://github.com/Xitaoyou/AiNieePlus/releases/download/manga-18-abcdef0/"
+    assets = [
+        {"name": WINDOWS_ASSET, "browser_download_url": prefix + WINDOWS_ASSET},
+        {"name": WINDOWS_INSTALLER, "browser_download_url": prefix + WINDOWS_INSTALLER,
+         "digest": "sha256:" + sha256(b"original").hexdigest()},
+    ]
+    url = manager._find_download_url(assets)
+    assert url == prefix + WINDOWS_INSTALLER
+    manager._remember_update_release({"assets": assets}, "18", url)
+    path, _, _ = manager._download_paths()
+    assert path.suffix == ".exe"
+    path.write_bytes(b"tampered")
+    manager._run_updater(path)
+    assert events == []
+    path.write_bytes(b"original")
+    manager._download_completed(str(path))
+    assert events[0] == "shutdown" and events[-1] == "exit"
+    assert "--installer" in events[1]
+    assert f"--wait-pid={os.getpid()}" in events[1]
+    (tmp_path / "portable.txt").touch()
+    assert manager._find_download_url(assets) == prefix + WINDOWS_ASSET
+    assert manager._download_paths()[0].suffix == ".zip"
 
 
 def test_task_progress_is_hidden_without_job_and_after_completion():
