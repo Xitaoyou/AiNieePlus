@@ -575,6 +575,48 @@ def test_clear_menu_accepts_real_dialogs_and_respects_scope(monkeypatch, kind, s
     dispose_editor(editor)
 
 
+def test_editor_header_models_update_project_and_canvas_button_dispatches_ocr():
+    editor = make_editor_for_actions()
+    header = editor.work_page.layout().itemAt(0).layout()
+    assert 0 <= header.indexOf(editor.project_summary_button) < header.indexOf(editor.detector)
+    assert header.indexOf(editor.detector) < header.indexOf(editor.ocr)
+    assert header.indexOf(editor.tool_recognize) == -1
+    assert editor.project_summary_button.text() == "日语 → 简中"
+
+    editor.refresh_model_catalogue([
+        {"id": "manga-panel", "name": "Panel", "role": "detect", "installed": True,
+         "default_confidence": .25},
+        {"id": "legacy-balloon-yolov4", "name": "Legacy", "role": "detect",
+         "installed": True, "default_confidence": .20},
+        {"id": "mangaocr", "name": "MangaOCR", "role": "ocr", "installed": True},
+        {"id": "rapidocr", "name": "RapidOCR", "role": "ocr", "installed": True},
+    ])
+    settings = lambda: editor.document["settings"]
+    editor.detector.setCurrentIndex(editor.detector.findData("legacy-balloon-yolov4"))
+    assert (settings()["detector"], settings()["confidence"]) == ("legacy-balloon-yolov4", .20)
+    editor.undo.undo()
+    assert (settings()["detector"], settings()["confidence"]) == ("manga-panel", .25)
+    editor.ocr.setCurrentIndex(editor.ocr.findData("rapidocr"))
+    assert settings()["ocr"] == "rapidocr"
+    assert editor.project_summary_button.text() == "日语 → 简中"
+
+    calls = []
+    editor.run = lambda stage, **options: calls.append((stage, options))
+    region_id = editor.page()["regions"][0]["id"]
+    editor.select_region(region_id)
+    editor.tool_recognize.click()
+    editor.clear_selection()
+    editor.tool_recognize.click()
+    editor.page()["regions"].clear()
+    editor.tool_recognize.click()
+    assert calls == [
+        ("ocr", {"scope": 0, "region_ids": [region_id], "ocr_engine": "rapidocr", "replace": True}),
+        ("ocr", {"scope": 0, "ocr_engine": "rapidocr", "replace": True}),
+        ("detect", {"scope": 0}),
+    ]
+    dispose_editor(editor)
+
+
 def test_one_click_prompts_and_manual_switch_follow_banner(monkeypatch):
     from PyQt5.QtWidgets import QMessageBox
 

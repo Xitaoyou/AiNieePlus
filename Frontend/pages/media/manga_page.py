@@ -1799,13 +1799,9 @@ class MangaPage(QWidget):
         self.ocr = QComboBox()
         for model_id in ("mangaocr", "rapidocr"):
             self.ocr.addItem(model_id, model_id)
-        self.detector.currentIndexChanged.connect(
-            lambda: self.set_setting("detector", self.detector.currentData())
-        )
-        # 用 lambda 吞掉信号附带的 index，否则它会被当成 notify 参数传入
-        self.detector.currentIndexChanged.connect(lambda: self.apply_detector_defaults())
+        self.detector.currentIndexChanged.connect(self.pick_detector)
         self.ocr.currentIndexChanged.connect(
-            lambda: self.set_setting("ocr", self.ocr.currentData())
+            lambda: not self.loading_form and self.set_setting("ocr", self.ocr.currentData())
         )
         self.model_catalogue = []
         self.source_language = QComboBox()
@@ -2024,8 +2020,17 @@ class MangaPage(QWidget):
         self.project_summary_button.setToolTip("检测模型、语言、阈值与翻译接口")
         self.project_summary_button.clicked.connect(self.open_project_settings)
         heading.addWidget(self.project_summary_button)
+        for label, combo in (("检测模型", self.detector), ("OCR 模型", self.ocr)):
+            heading.addWidget(QLabel(label, self.work_page))
+            combo.setAccessibleName(label)
+            combo.setToolTip(f"为当前工程选择{label}")
+            combo.setMinimumWidth(105)
+            combo.setMaximumWidth(220)
+            combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            heading.addWidget(combo, 1)
         heading.addStretch(1)
         root.addLayout(heading)
+        self.sync_project_summary()
 
         # ---- 命令栏：当前页入口在菜单，整部入口在右上角 ----
         command_card = SimpleCardWidget(self.work_page)
@@ -2257,15 +2262,11 @@ class MangaPage(QWidget):
         self.geometry_done.clicked.connect(self.exit_geometry_mode)
         tools.addWidget(self.geometry_done)
         self.precise_divider = self.divider(tools)
-        # OCR 引擎下拉 + 识别按钮：选中框时识别该框，未选中时识别整页；
-        # 页面上一个框都没有时先问要不要检测。
-        self.tool_ocr = QComboBox()
-        self.tool_ocr.setToolTip("选择 OCR 引擎；识别时只处理当前页或选中的文字框")
-        self.tool_ocr.setFixedWidth(150)
-        self.tool_ocr.currentIndexChanged.connect(self.pick_tool_engine)
-        tools.addWidget(self.tool_ocr)
         self.tool_recognize = TransparentToolButton(FluentIcon.SEARCH, self)
-        self.tool_recognize.setToolTip("识别：有选中的框就识别框，没有就识别整页")
+        self.tool_recognize.setAccessibleName("识别")
+        self.tool_recognize.setToolTip(
+            "识别：无框时检测建框；有框时 OCR 当前页或选中的框。OCR 会更新未锁定的原文。"
+        )
         self.tool_recognize.clicked.connect(self.recognize_here)
         tools.addWidget(self.tool_recognize)
         tools.addWidget(self.precise)
@@ -3546,53 +3547,45 @@ class MangaPage(QWidget):
         """
         if self.document or self.job_id:
             return
-        self.apply_detector_defaults(notify=False)
+        value = self.detector_threshold(self.detector.currentData())
+        if value is not None:
+            self.confidence.setValue(value)
 
-    def apply_detector_defaults(self, notify=True):
-        """切换检测模型时套用该模型的建议阈值。
-
-        取值来自 CATALOGUE 的 default_confidence，与 ImageTrans 同权重
-        model.json 的 confidence / box_thresh 一致。
-        """
-        if self.loading_form or not hasattr(self, "confidence"):
-            return
-        model_id = self.detector.currentData()
+    def detector_threshold(self, model_id):
         model = next(
             (m for m in (self.model_catalogue or []) if m.get("id") == model_id),
             None,
         )
-        if not model:
+        value = model.get("default_confidence") if model else None
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def pick_detector(self, *_):
+        if self.loading_form:
             return
-        value = model.get("default_confidence")
-        if not isinstance(value, (int, float)):
+        model_id = self.detector.currentData()
+        if not model_id:
             return
-        if abs(self.confidence.value() - float(value)) < 1e-6:
+        value = self.detector_threshold(model_id)
+        if not self.document:
+            if value is not None:
+                self.confidence.setValue(value)
             return
-        self.confidence.blockSignals(True)
-        self.confidence.setValue(float(value))
-        self.confidence.blockSignals(False)
-        if self.document:
-            self.set_setting("confidence", float(value))
-        if notify and self.document:
-            self.status.setText(
-                f"已切换到「{model['name']}」，检测阈值自动设为 {value}；"
-                "若检出过少可继续调低"
-            )
+
+        def action():
+            settings = self.document["settings"]
+            settings["detector"] = model_id
+            if value is not None:
+                settings["confidence"] = value
+
+        self.edit("切换检测模型", action)
 
     def fill_model_choices(self):
         catalogue = getattr(self, "model_catalogue", None) or []
         for combo, role, current in (
-            (getattr(self, "detector", None), "detect", self.detector.currentData()),
-            (getattr(self, "ocr", None), "ocr", self.ocr.currentData()),
-            (
-                getattr(self, "tool_ocr", None),
-                "ocr",
-                self.tool_ocr.currentData() or self.ocr.currentData(),
-            ),
+            (self.detector, "detect", self.detector.currentData()),
+            (self.ocr, "ocr", self.ocr.currentData()),
         ):
-            if combo is None:
-                continue
-            tracks_project = bool(self.document and combo in (self.detector, self.ocr))
+            tracks_project = bool(self.document)
             if tracks_project:
                 key = "detector" if role == "detect" else "ocr"
                 current = self.document["settings"].get(key, current)
@@ -3620,10 +3613,6 @@ class MangaPage(QWidget):
                 index = combo.count() - 1
             combo.setCurrentIndex(index if index >= 0 else 0)
             combo.blockSignals(False)
-        if hasattr(self, "tool_ocr") and self.tool_ocr.currentIndex() < 0:
-            self.tool_ocr.blockSignals(True)
-            self.tool_ocr.addItem(self.ocr.currentText(), self.ocr.currentData())
-            self.tool_ocr.blockSignals(False)
 
     def unavailable_model_label(self, model_id):
         model = next(
@@ -3631,25 +3620,8 @@ class MangaPage(QWidget):
         )
         return f"{model['name'] if model else model_id}（不可用）"
 
-    def pick_tool_engine(self, *_):
-        """工具条的引擎下拉直接改工程 OCR，省得再开项目设置。"""
-        engine = self.tool_ocr.currentData()
-        if not engine or not self.document:
-            return
-        self.ocr.blockSignals(True)
-        index = self.ocr.findData(engine)
-        if index < 0:
-            self.ocr.addItem(self.tool_ocr.currentText(), engine)
-            index = self.ocr.findData(engine)
-        self.ocr.setCurrentIndex(max(0, index))
-        self.ocr.blockSignals(False)
-        self.set_setting("ocr", engine)
-
     def recognize_here(self):
-        """工具条识别按钮：选中框就识别框，没选中就识别当前页。
-
-        当前页还没有任何文字框时先问一句要不要检测，避免 OCR 空跑。
-        """
+        """无框时先建框；有框时直接 OCR 选中的框或当前页。"""
         if not self.document:
             self.status.setText("请先导入漫画或打开工程包")
             return
@@ -3660,48 +3632,28 @@ class MangaPage(QWidget):
         page = self.page()
         if page is None:
             return
-        engine = self.tool_ocr.currentData()
+        if not page["regions"]:
+            self.run("detect", scope=0)
+            return
+        engine = self.ocr.currentData()
+        selected = set(self.canvas.selected_ids() or ([self.selected] if self.selected else []))
         ids = [
             r["id"]
             for r in page["regions"]
-            if r["id"] in set(self.canvas.selected_ids() or [])
+            if r["id"] in selected
         ]
         if ids:
-            self.run("ocr", scope=0, region_ids=ids, ocr_engine=engine)
+            self.run("ocr", scope=0, region_ids=ids, ocr_engine=engine, replace=True)
             return
-        if not page["regions"]:
-            answer = self.ask(
-                "尚未识别文字框",
-                "当前页没有文字框，要先检测再进行 OCR 吗？",
-                yes="先检测",
-            )
-            if answer != QMessageBox.Yes:
-                return
-            self.run("recognize", scope=0, ocr_engine=engine)
-            return
-        self.run("ocr", scope=0, ocr_engine=engine)
+        self.run("ocr", scope=0, ocr_engine=engine, replace=True)
 
     def sync_project_summary(self):
         if not hasattr(self, "project_summary_button"):
             return
-        detector = self.detector.currentText()
-        ocr = self.ocr.currentText()
         source = self.source_language.currentText()
         target = self.target_language.currentText()
-        summary = f"{source} → {target}   ·   {ocr}"
-        # 模型名（含语言前缀）可以很长；直接 setText 会让按钮按全文算最小宽度，
-        # 把小窗口的右栏挤出屏幕。截断显示，完整内容放 tooltip。
-        self.project_summary_button.setMaximumWidth(340)
-        self.project_summary_button.setText(
-            self.project_summary_button.fontMetrics().elidedText(
-                summary, Qt.ElideRight, 300
-            )
-        )
-        self.project_summary_button.setToolTip(
-            f"气泡检测模型：{detector}\nOCR 模型：{ocr}\n"
-            f"语言：{source} → {target} · 阈值 {self.confidence.value():.2f}\n"
-            "点击打开项目设置，可修改模型、语言与接口。"
-        )
+        self.project_summary_button.setText(f"{source} → {target}")
+        self.project_summary_button.setToolTip(f"项目设置 · {source} → {target}")
 
     def open_project_settings(self):
         self.fill_model_choices()
@@ -3733,15 +3685,13 @@ class MangaPage(QWidget):
             form = QFormLayout()
             form.setHorizontalSpacing(12)
             form.setVerticalSpacing(8)
-            form.addRow("检测模型", self.detector)
-            form.addRow("OCR 模型", self.ocr)
             form.addRow("检测阈值", self.confidence)
             form.addRow(self.panels)
             form.addRow(self.rtl)
             form.addRow(self.auto_recognize)
             form.addRow("翻译接口", self.provider)
             layout.addLayout(form)
-            layout.addWidget(dialog_note("模型、语言与识别选项随本工程保存。"))
+            layout.addWidget(dialog_note("语言与识别选项随本工程保存。模型可在编辑器顶栏切换。"))
             layout.addStretch(1)
             buttons = QHBoxLayout()
             buttons.setSpacing(8)
