@@ -14,6 +14,7 @@ from Backend.application.manga_store import atomic_json
 
 _SYSTEM_OCR_AVAILABLE = sys.platform == "win32"
 LEGACY_BALLOON_ID = "legacy-balloon-yolov4"
+LEGACY_BALLOON_WEIGHT_SIZE = 281401012
 LEGACY_BALLOON_HASHES = {
     "model.weights": "7bd9c3b91c6c042efbb88115a9e2c495a167d5622da5b45da83a4cceafb82662",
     "model.cfg": "1584e064f6ff8c32c63621a2974cc920f0bd4bc670cf87ca36a2dd7b398963c3",
@@ -875,9 +876,24 @@ class ModelRegistry:
 
     def folder(self, model_id):
         spec = self.spec(model_id)
+        model_id = spec["id"]
         for root in (self.root, self.bundled):
             folder = root / model_id
             if all((folder / f).is_file() for f in spec["files"]):
+                if model_id == LEGACY_BALLOON_ID:
+                    # An older build stored a different model under this ID.
+                    # Check its small CFG and the weight size without hashing
+                    # the full 281 MB on each detection or catalogue refresh.
+                    try:
+                        if (
+                            (folder / "model.weights").stat().st_size != LEGACY_BALLOON_WEIGHT_SIZE
+                            or (folder / "model.cfg").stat().st_size != 19669
+                            or hashlib.sha256((folder / "model.cfg").read_bytes()).hexdigest()
+                            != LEGACY_BALLOON_HASHES["model.cfg"]
+                        ):
+                            continue
+                    except OSError:
+                        continue
                 return folder
         raise PipelineError(
             "MANGA_MODEL_MISSING", f"请在模型中心安装或导入 {model_id}", 409
@@ -1156,11 +1172,12 @@ class ModelRegistry:
             elif kind == "package":
                 row["installed"] = self.package_available(spec.get("backend"))
             else:
+                # A broken local copy still needs an uninstall action.
+                row["can_uninstall"] = not spec["core"] and (self.root / spec["id"]).is_dir()
                 try:
                     folder = self.folder(spec["id"])
                     row["path"] = str(folder)
                     row["installed"] = True
-                    row["can_uninstall"] = not spec["core"] and folder.parent == self.root
                 except PipelineError:
                     row["installed"] = False
             result.append(row)

@@ -136,12 +136,14 @@ def test_uninstall_only_removes_an_optional_installed_copy(registry):
     key = "legacy-balloon-yolov4"
     folder = install(registry.root, key)
     original = install(registry.root.parent / "ImageTrans", key)
+    bundled_legacy = install(registry.bundled, key)
     builtin = install(registry.bundled, "manga-panel")
-    assert next(m for m in registry.catalogue() if m["id"] == key)["can_uninstall"]
+    row = next(m for m in registry.catalogue() if m["id"] == key)
+    assert row["can_uninstall"] and not row["installed"]
     result = registry.uninstall(key)
     row = next(m for m in result if m["id"] == key)
     assert not row["installed"] and not row["can_uninstall"]
-    assert not folder.exists() and original.exists()
+    assert not folder.exists() and original.exists() and bundled_legacy.exists()
     with pytest.raises(PipelineError) as error:
         registry.uninstall("manga-panel")
     assert error.value.code == "MODEL_UNINSTALL_UNSUPPORTED" and builtin.exists()
@@ -215,7 +217,8 @@ def test_recognize_requires_api_configuration():
     assert error.value.code == "MODEL_API_NOT_CONFIGURED"
 
 
-def test_model_dialog_groups_and_marks_missing_api(registry):
+def test_model_dialog_groups_and_marks_missing_api(registry, monkeypatch):
+    from PyQt5.QtWidgets import QMessageBox
     from Frontend.pages.media.manga_page import MangaPage, ModelDialog
 
     class BackendStub:
@@ -288,6 +291,17 @@ def test_model_dialog_groups_and_marks_missing_api(registry):
         if dialog.table.item(r, 2) is not None
     ]
     assert "已就绪" in states
+    broken = next(m for m in registry.catalogue() if m["id"] == "legacy-balloon-yolov4")
+    broken["can_uninstall"] = True
+    assert dialog.action_for(broken)[0] == "卸载残留"
+    calls = []
+    monkeypatch.setattr(dialog, "model_request", lambda *args: calls.append(args))
+    monkeypatch.setattr(editor, "ask", lambda *args, **kw: QMessageBox.Cancel)
+    dialog.uninstall_for(broken)
+    assert calls == []
+    monkeypatch.setattr(editor, "ask", lambda *args, **kw: QMessageBox.Yes)
+    dialog.uninstall_for(broken)
+    assert calls[0][:2] == ("DELETE", "/models/legacy-balloon-yolov4")
     dialog.deleteLater()
     editor.cleanup()
     editor.pool.waitForDone(3000)

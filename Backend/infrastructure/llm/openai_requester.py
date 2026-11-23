@@ -9,6 +9,29 @@ import json
 from openai.types.chat import ChatCompletion
 
 
+def _split_message_content(content) -> tuple[str, str]:
+    """Normalise chat text and structured thinking/text chunks to strings."""
+    if isinstance(content, str):
+        return "", content
+    if not isinstance(content, (list, tuple)):
+        return "", ""
+
+    def field(chunk, key):
+        return chunk.get(key) if isinstance(chunk, dict) else getattr(chunk, key, None)
+
+    thinking, text = [], []
+    for chunk in content:
+        kind = field(chunk, "type")
+        if kind == "thinking":
+            inner_reasoning, inner_text = _split_message_content(field(chunk, "thinking"))
+            thinking.append(inner_reasoning + inner_text)
+        elif kind == "text":
+            value = field(chunk, "text")
+            if isinstance(value, str):
+                text.append(value)
+    return "".join(thinking), "".join(text)
+
+
 # 接口请求器
 class OpenaiRequester(LogMixin, Base):
     def __init__(self) -> None:
@@ -185,10 +208,9 @@ class OpenaiRequester(LogMixin, Base):
             choices = chunk.get("choices")
             if choices:
                 delta = choices[0].get("delta", {})
-                if delta.get("content"):
-                    response_content += delta["content"]
-                if delta.get("reasoning_content"):
-                    response_think += delta["reasoning_content"]
+                thinking, content = _split_message_content(delta.get("content"))
+                response_content += content
+                response_think += delta.get("reasoning_content") or thinking
 
             # 提取 usage 信息（通常在最后一个 chunk）
             usage = chunk.get("usage")
@@ -205,20 +227,16 @@ class OpenaiRequester(LogMixin, Base):
         返回: (response_think, response_content, prompt_tokens, completion_tokens)
         """
         message = response.choices[0].message
+        thinking, content = _split_message_content(message.content)
 
         # 自适应提取推理过程
-        if "</think>" in message.content:
-            splited = message.content.split("</think>")
+        if "</think>" in content:
+            splited = content.split("</think>")
             response_think = splited[0].removeprefix("<think>").replace("\n\n", "\n")
             response_content = splited[-1]
         else:
-            try:
-                response_think = message.reasoning_content
-                if not response_think:
-                    response_think = ""
-            except Exception:
-                response_think = ""
-            response_content = message.content
+            response_think = getattr(message, "reasoning_content", None) or thinking
+            response_content = content
 
         # 获取token消耗
         try:

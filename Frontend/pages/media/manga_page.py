@@ -682,6 +682,9 @@ class ModelDialog(QDialog):
     def download_for(self, model):
         if not model or model.get("installed"):
             return
+        if model.get("can_uninstall"):
+            self.status.setText("请先卸载不完整的模型，再重新下载")
+            return
         self.model_request(
             "POST", f"/models/{model['id']}/download",
             f"正在下载 {model['name']}（约 {model['size_mb']} MB）…", "模型已下载并安装",
@@ -826,6 +829,8 @@ class ModelDialog(QDialog):
                 ("内置随包" if model.get("core") else "已安装"),
                 False,
             )
+        if model.get("can_uninstall"):
+            return "模型不完整 · 请卸载后重装", True
         if model.get("url"):
             return f"需下载 {model['size_mb']} MB", True
         return "需导入目录", True
@@ -847,6 +852,8 @@ class ModelDialog(QDialog):
             return "安装说明", self.package_hint
         if model.get("installed"):
             return "已安装", None
+        if model.get("can_uninstall"):
+            return "卸载残留", self.uninstall_for
         if model.get("url"):
             return "一键下载", self.download_for
         return "导入目录", self.import_for
@@ -947,6 +954,7 @@ class ModelDialog(QDialog):
             for m in models
             if m.get("kind", "local") == "local"
             and not m.get("installed")
+            and not m.get("can_uninstall")
             and m.get("url")
             and m.get("supported", True)
         ]
@@ -1018,6 +1026,9 @@ class ModelDialog(QDialog):
         if model.get("installed"):
             self.status.setText("该模型已安装")
             return
+        if model.get("can_uninstall"):
+            self.status.setText("请先卸载不完整的模型，再重新导入")
+            return
         folder = QFileDialog.getExistingDirectory(
             self, "选择模型目录"
         )
@@ -1028,22 +1039,24 @@ class ModelDialog(QDialog):
             )
 
     def uninstall_selected(self):
-        model = self.selected()
+        self.uninstall_for(self.selected())
+
+    def uninstall_for(self, model):
         if not model or not model.get("can_uninstall"):
             return
         settings = (self.page.document or {}).get("settings", {})
-        if (
+        if model.get("installed") and (
             model["role"] == "detect" and settings.get("detector") == model["id"]
             or model["role"] == "ocr" and settings.get("ocr") == model["id"]
         ):
             self.status.setText("当前工程正在使用此模型，请先在项目设置中切换")
             return
-        if not self.page.ask_yes_no(
+        if self.page.ask(
             "卸载漫画模型",
             f"卸载「{model['name']}」？只删除 AiNiee 中安装的副本。"
             "其他工程如果使用此模型，需要重新安装或切换。",
-            "卸载", "取消",
-        ):
+            yes="卸载",
+        ) != QMessageBox.Yes:
             return
         self.model_request(
             "DELETE", f"/models/{model['id']}", "正在卸载…", "模型已卸载",
@@ -1876,12 +1889,11 @@ class MangaPage(QWidget):
         self.target.textChanged.connect(
             lambda: self.region_value("target", self.target.toPlainText())
         )
-        # 原文 / 译文行内锁定。工程里已有的区域锁定字段仍保留。
-        self.source_lock = QCheckBox(self)
+        self.source_lock = QCheckBox("锁定原文")
         self.source_lock.setToolTip(
             "锁定后，整部识别 / OCR 与重做识别会跳过此框，保留此处原文"
         )
-        self.target_lock = QCheckBox(self)
+        self.target_lock = QCheckBox("锁定译文")
         self.target_lock.setToolTip(
             "锁定后，整部翻译与重做翻译会跳过此框，保留此处译文"
         )
@@ -1973,7 +1985,7 @@ class MangaPage(QWidget):
         self.stroke = QSpinBox()
         self.stroke.setRange(0, 30)
         self.stroke.valueChanged.connect(lambda v: self.style_value("stroke_width", v))
-        self.rotation = QSpinBox()
+        self.rotation = QDoubleSpinBox()
         self.rotation.setRange(-180, 180)
         self.rotation.valueChanged.connect(self.rotate)
         self.removal = QComboBox()
@@ -2351,12 +2363,19 @@ class MangaPage(QWidget):
         text_header.addWidget(StrongBodyLabel("文字", right_card))
         text_header.addStretch(1)
         form.addRow(text_header)
-        for caption, field in (("原文", self.source), ("译文", self.target)):
+        for caption, field, lock in (
+            ("原文", self.source, self.source_lock),
+            ("译文", self.target, self.target_lock),
+        ):
             label = QLabel(caption, right_card)
             # 多行输入框比标签高得多，标签要对齐到首行文字而不是整行居中
             label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             label.setContentsMargins(0, 4, 0, 0)
-            form.addRow(label, field)
+            text_row = QVBoxLayout()
+            text_row.setSpacing(4)
+            text_row.addWidget(field)
+            text_row.addWidget(lock)
+            form.addRow(label, text_row)
         # ==== 排版 ====
         typography_header = QHBoxLayout()
         typography_header.setContentsMargins(0, 12, 0, 2)
@@ -4092,7 +4111,9 @@ class MangaPage(QWidget):
             widget.blockSignals(True)
             widget.setCurrentIndex(max(0, widget.findData(value)))
             widget.blockSignals(False)
+        self.rotation.blockSignals(True)
         self.rotation.setValue(r["layout_rect"]["rotation"])
+        self.rotation.blockSignals(False)
         self.punctuation_action.blockSignals(True)
         self.punctuation_action.setChecked(s.get("auto_punctuation", False))
         self.punctuation_action.blockSignals(False)
@@ -5113,6 +5134,8 @@ class MangaPage(QWidget):
                 detail = f"{label} {progress['current']} / {progress.get('total', 0)} {progress.get('unit', '页')}"
             elif "line" in progress:
                 detail = f"翻译 {progress['line']} / {progress.get('total_line', 0)} 条"
+            if progress.get("error_requests"):
+                detail += f" · 失败 {progress['error_requests']} 次"
             self.status.setText(state + (" · " + detail if detail else ""))
             total = progress.get("total", progress.get("total_line", 0))
             current = progress.get("current", progress.get("line", 0))

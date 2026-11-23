@@ -617,6 +617,20 @@ def test_editor_header_models_update_project_and_canvas_button_dispatches_ocr():
     dispose_editor(editor)
 
 
+def test_region_refresh_accepts_fractional_rotation_without_editing():
+    editor = make_editor_for_actions()
+    assert editor.source_lock.parentWidget() is editor.source.parentWidget()
+    assert editor.target_lock.parentWidget() is editor.target.parentWidget()
+    assert editor.source_lock.parentWidget() is not editor
+    editor.region()["layout_rect"]["rotation"] = 2.75
+    previous = editor.undo.count()
+    editor.select_region(editor.selected)
+    assert editor.rotation.value() == 2.75
+    assert editor.region()["layout_rect"]["rotation"] == 2.75
+    assert editor.undo.count() == previous
+    dispose_editor(editor)
+
+
 def test_one_click_prompts_and_manual_switch_follow_banner(monkeypatch):
     from PyQt5.QtWidgets import QMessageBox
 
