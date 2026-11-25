@@ -333,6 +333,9 @@ class Signals(QObject):
     done = pyqtSignal(object, object, object)
 
 
+_ACTIVE_TASKS = set()
+
+
 class Background(QRunnable):
     def __init__(self, action):
         super().__init__()
@@ -346,6 +349,7 @@ class Background(QRunnable):
             self.signals.done.emit(self, None, str(error))
         finally:
             self.action = None
+            _ACTIVE_TASKS.discard(self)
 
 
 class EditCommand(QUndoCommand):
@@ -3620,6 +3624,7 @@ class MangaPage(QWidget):
         return button
 
     def connect_task(self, task, callback):
+        _ACTIVE_TASKS.add(task)
         self.task_callbacks[task] = callback
         task.signals.done.connect(self.task_finished, Qt.QueuedConnection)
 
