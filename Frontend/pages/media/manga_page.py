@@ -1745,10 +1745,19 @@ class MangaPage(QWidget):
         self.build_ui()
         self.apply_theme()
         qconfig.themeChanged.connect(self.apply_theme)
-        QTimer.singleShot(0, self.refresh_history)
-        QTimer.singleShot(0, self.refresh_providers)
-        QTimer.singleShot(0, self.refresh_fonts)
-        QTimer.singleShot(0, self.refresh_model_catalogue)
+        self._init_timer = QTimer(self)
+        self._init_timer.setSingleShot(True)
+        self._init_timer.setInterval(0)
+        self._init_timer.timeout.connect(self._run_deferred_init)
+        self._init_timer.start()
+
+    def _run_deferred_init(self):
+        if self.closed or sip.isdeleted(self):
+            return
+        self.refresh_history()
+        self.refresh_providers()
+        self.refresh_fonts()
+        self.refresh_model_catalogue()
 
     def apply_theme(self, *_):
         if sip.isdeleted(self):
@@ -5824,15 +5833,34 @@ class MangaPage(QWidget):
 
     def cleanup(self):
         self.closed = True
+        if hasattr(self, "_init_timer"):
+            self._init_timer.stop()
         self.task_callbacks.clear()
+        for task in list(self.tasks):
+            try:
+                task.signals.done.disconnect(self.task_finished)
+            except (TypeError, RuntimeError):
+                pass
+        self.tasks.clear()
         self.save_timer.stop()
         self.poll_timer.stop()
         if hasattr(self, "progress_panel") and not sip.isdeleted(self.progress_panel):
             self.progress_panel.cleanup()
-        for slot in (self.apply_theme, getattr(self.canvas, "apply_theme", None)):
+        for sig, slot in (
+            (qconfig.themeChanged, self.apply_theme),
+            (qconfig.themeChanged, getattr(self.canvas, "apply_theme", None)),
+            (
+                qconfig.themeColorChanged,
+                getattr(
+                    getattr(self.start_page, "drop_card", None),
+                    "_refresh_accent",
+                    None,
+                ),
+            ),
+        ):
             if slot is None:
                 continue
             try:
-                qconfig.themeChanged.disconnect(slot)
+                sig.disconnect(slot)
             except (TypeError, RuntimeError):
                 pass
