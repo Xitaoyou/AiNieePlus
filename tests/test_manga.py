@@ -668,3 +668,27 @@ def test_recognize_emits_fine_grained_detect_and_ocr_progress(workspace, monkeyp
         for e in ocr_events
     )
     assert any(e.get("empty") is True for e in ocr_events)
+
+
+def test_detect_marks_tall_japanese_bubbles_vertical(workspace, monkeypatch):
+    store, doc = workspace
+    doc.pages[0].regions = []
+    doc.settings.source_language = "ja"
+    doc = store.save(doc, doc.revision)
+    service = MangaService(store, StubModels())
+
+    def compute(context, **kw):
+        if kw["operation"] == "detect":
+            return [
+                {"rect": [10, 10, 28, 130], "score": 0.9, "class_id": 1},
+                {"rect": [60, 10, 140, 40], "score": 0.9, "class_id": 1},
+            ]
+        raise AssertionError(kw)
+
+    monkeypatch.setattr(service, "compute", compute)
+    result = service.run(doc.id, "detect", page_ids=[doc.pages[0].id])
+    regions = result["workspace"]["pages"][0]["regions"]
+    tall = next(r for r in regions if r["ocr_rect"]["width"] == 28)
+    wide = next(r for r in regions if r["ocr_rect"]["width"] == 140)
+    assert tall["style"]["vertical"] is True
+    assert wide["style"]["vertical"] is False

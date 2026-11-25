@@ -109,7 +109,9 @@ def render_text(
     rect, style = region["layout_rect"], region["style"]
     width = max(1, round(width if width is not None else rect["width"]))
     height = max(1, round(height if height is not None else rect["height"]))
-    padding = min(style["padding"], max(0, (min(width, height) - 1) // 2))
+    short_side = min(width, height)
+    max_pad = max(1, short_side // 10) if short_side < 40 else max(0, (short_side - 1) // 2)
+    padding = min(style["padding"], max_pad)
     available_w, available_h = max(1, width - 2 * padding), max(1, height - 2 * padding)
     path = font_path or style.get("font") or default_font()
     stroke = style["stroke_width"] + int(style["bold"])

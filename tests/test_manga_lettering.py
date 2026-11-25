@@ -99,3 +99,15 @@ def test_vertical_column_never_starts_with_punctuation():
     _, info = render_text(r.model_dump())
     for line in info["lines"]:
         assert not line.startswith(("。", "、", "」", "…")), line
+
+
+def test_narrow_tall_bubble_stays_readable():
+    r = Region(
+        layout_rect=Rect(x=0, y=0, width=28, height=135),
+        target="钓到了~！",
+    )
+    r.style.vertical = True
+    r.style.autofit = True
+    _, info = render_text(r.model_dump())
+    assert info["font_size"] >= 16
+    assert not info["overflow"]

@@ -595,16 +595,26 @@ class MangaService:
                             if min(w, h) <= 0:
                                 continue
                             rect = Rect(x=x, y=y, width=w, height=h)
+                            style = (
+                                page.default_style
+                                or document.settings.default_style
+                            ).model_copy(deep=True)
+                            if (
+                                page.default_style is None
+                                and not document.settings.default_style.vertical
+                                and document.settings.source_language.lower().startswith(
+                                    ("ja", "zh")
+                                )
+                                and h >= w * 1.35
+                            ):
+                                style.vertical = True
                             region = Region(
                                 ocr_rect=rect.model_copy(),
                                 erase_rect=rect.model_copy(),
                                 layout_rect=rect.model_copy(),
                                 confidence=detected["score"],
                                 removal=document.settings.removal,
-                                style=(
-                                    page.default_style
-                                    or document.settings.default_style
-                                ).model_copy(deep=True),
+                                style=style,
                             )
                             candidates = [
                                 p
