@@ -1101,6 +1101,7 @@ def test_font_controls_and_progress_overlay_remain_accessible():
 
 
 def test_progress_overlay_detect_ocr_notices_and_empty_page_numbers():
+    from PyQt5.QtCore import Qt
     from PyQt5.QtTest import QTest
 
     app = QApplication.instance()
