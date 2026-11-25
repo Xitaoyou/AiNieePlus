@@ -577,11 +577,21 @@ def test_clear_menu_accepts_real_dialogs_and_respects_scope(monkeypatch, kind, s
 
 def test_editor_header_models_update_project_and_canvas_button_dispatches_ocr():
     editor = make_editor_for_actions()
-    header = editor.work_page.layout().itemAt(0).layout()
+    header = editor.commands_layout
     assert 0 <= header.indexOf(editor.project_summary_button) < header.indexOf(editor.detector)
     assert header.indexOf(editor.detector) < header.indexOf(editor.ocr)
     assert header.indexOf(editor.tool_recognize) == -1
+    assert editor.tool_recognize.text() == "识别"
     assert editor.project_summary_button.text() == "日语 → 简中"
+
+    editor.resize(960, 800)
+    editor.show()
+    QApplication.instance().processEvents()
+    assert editor.detector.isHidden()
+    assert not editor.ocr.isHidden()
+    editor.resize(1440, 900)
+    QApplication.instance().processEvents()
+    assert not editor.detector.isHidden()
 
     editor.refresh_model_catalogue([
         {"id": "manga-panel", "name": "Panel", "role": "detect", "installed": True,
@@ -682,10 +692,7 @@ def test_menus_reading_panel_compact_pages_and_zoom():
         for button in editor.findChildren(DropDownPushButton)
         if hasattr(button, "task_menu")
     }
-    assert [a.text() for a in menus["识别"]._actions] == [
-        "检测当前页文字框",
-        "读取当前页原文（OCR）",
-    ]
+    assert "识别" not in menus
     assert {"翻译当前页"}.issubset({a.text() for a in menus["翻译"]._actions})
     assert {"导入图片 / PDF…", "导入文件夹…", "导出成品…"}.issubset(
         {a.text() for a in menus["文件"]._actions}
@@ -1183,5 +1190,52 @@ def test_progress_overlay_detect_ocr_notices_and_empty_page_numbers():
         and child.pos().y() == 0
     ]
     assert orphan_top_left == []
+
+    dispose_editor(editor)
+
+
+def test_region_provider_cache_switch_and_retranslate():
+    editor = make_editor_for_actions()
+    editor.region_provider.addItem("Gemini", "gemini")
+    editor.region_provider.addItem("GPT", "gpt")
+    region = editor.region()
+    region["source"] = "おはよう"
+    region["target"] = "早安(Gemini)"
+    region["translation_provider"] = "gemini"
+    region["translation_cache"] = {
+        "gemini": {"source": "おはよう", "target": "早安(Gemini)"},
+        "gpt": {"source": "おはよう", "target": "早上好(GPT)"},
+    }
+    editor.select_region(region["id"])
+
+    calls = []
+    editor.run = lambda stage, **kw: calls.append((stage, kw))
+
+    editor.region_provider.setCurrentIndex(editor.region_provider.findData("gpt"))
+    assert editor.region()["target"] == "早上好(GPT)"
+    assert editor.target.toPlainText() == "早上好(GPT)"
+    assert calls == []
+
+    editor.region_provider.setCurrentIndex(editor.region_provider.findData("gemini"))
+    assert editor.region()["target"] == "早安(Gemini)"
+    assert editor.target.toPlainText() == "早安(Gemini)"
+    assert calls == []
+
+    editor.region_translate_btn.click()
+    assert "gemini" not in editor.region()["translation_cache"]
+    assert calls == [
+        (
+            "translate",
+            {
+                "scope": 0,
+                "region_ids": [region["id"]],
+                "replace": True,
+                "provider_id": "gemini",
+            },
+        )
+    ]
+
+    editor.region_value("source", "こんにちは")
+    assert editor.region()["translation_cache"] == {}
 
     dispose_editor(editor)

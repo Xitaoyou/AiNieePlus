@@ -115,6 +115,8 @@ class Region(MangaModel):
         "idle", "pending", "succeeded", "failed", "cancelled"
     ] = "idle"
     translation_error: str = ""
+    translation_provider: str = ""
+    translation_cache: dict[str, dict] = Field(default_factory=dict)
     source_locked: bool = False
     target_locked: bool = False
     geometry_locked: bool = False

@@ -2047,37 +2047,17 @@ class MangaPage(QWidget):
         self.font_mode_hint = QLabel("选择文字框后显示实际字号")
         self.font_mode_hint.setWordWrap(True)
 
-        # ---- 顶栏：返回 + 标题 + 项目摘要（点击修改模型与语言）----
-        heading = QHBoxLayout()
-        back = TransparentPushButton(FluentIcon.RETURN, "返回", self.work_page)
-        back.clicked.connect(self.back_to_start)
-        heading.addWidget(back)
-        heading.addWidget(SubtitleLabel("漫画翻译", self.work_page))
-        heading.addSpacing(16)
-        self.project_summary_button = TransparentPushButton(
-            FluentIcon.SETTING, "项目设置", self.work_page
-        )
-        self.project_summary_button.setToolTip("检测模型、语言、阈值与翻译接口")
-        self.project_summary_button.clicked.connect(self.open_project_settings)
-        heading.addWidget(self.project_summary_button)
-        for label, combo in (("检测模型", self.detector), ("OCR 模型", self.ocr)):
-            heading.addWidget(QLabel(label, self.work_page))
-            combo.setAccessibleName(label)
-            combo.setToolTip(f"为当前工程选择{label}")
-            combo.setMinimumWidth(105)
-            combo.setMaximumWidth(220)
-            combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-            heading.addWidget(combo, 1)
-        heading.addStretch(1)
-        root.addLayout(heading)
-        self.sync_project_summary()
-
-        # ---- 命令栏：当前页入口在菜单，整部入口在右上角 ----
+        # ---- 统一顶栏：返回 + 菜单 + 项目设置/模型 + 一键翻译 ----
         command_card = SimpleCardWidget(self.work_page)
+        self.command_card = command_card
         commands = QHBoxLayout(command_card)
+        self.commands_layout = commands
         commands.setContentsMargins(10, 8, 10, 8)
         commands.setSpacing(6)
         root.addWidget(command_card)
+        back = TransparentPushButton(FluentIcon.RETURN, "返回", command_card)
+        back.clicked.connect(self.back_to_start)
+        commands.addWidget(back)
         self.menu_button(
             commands,
             "文件",
@@ -2087,14 +2067,6 @@ class MangaPage(QWidget):
                 ("打开工程包…", self.import_project),
                 ("保存工程  Ctrl+S", self.save),
                 ("导出成品…", self.export),
-            ],
-        )
-        self.menu_button(
-            commands,
-            "识别",
-            [
-                ("检测当前页文字框", lambda: self.ask_detection(0)),
-                ("读取当前页原文（OCR）", lambda: self.ask_ocr(0)),
             ],
         )
         translate_menu = self.menu_button(
@@ -2166,6 +2138,26 @@ class MangaPage(QWidget):
         self.undo.canRedoChanged.connect(self.redo_button.setEnabled)
         self.undo_button.setEnabled(False)
         self.redo_button.setEnabled(False)
+        self.project_summary_button = TransparentPushButton(
+            FluentIcon.SETTING, "项目设置", command_card
+        )
+        self.project_summary_button.setToolTip("检测模型、语言、阈值与翻译接口")
+        self.project_summary_button.clicked.connect(self.open_project_settings)
+        commands.addWidget(self.project_summary_button)
+        self.detector_label = QLabel("检测模型", command_card)
+        self.ocr_label = QLabel("OCR 模型", command_card)
+        for caption_label, label, combo in (
+            (self.detector_label, "检测模型", self.detector),
+            (self.ocr_label, "OCR 模型", self.ocr),
+        ):
+            commands.addWidget(caption_label)
+            combo.setAccessibleName(label)
+            combo.setToolTip(f"为当前工程选择{label}")
+            combo.setMinimumWidth(88)
+            combo.setMaximumWidth(150)
+            combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            commands.addWidget(combo)
+        self.sync_project_summary()
         commands.addStretch(1)
         one_click = PrimarySplitPushButton("一键翻译", command_card)
         one_menu = RoundMenu(parent=one_click)
@@ -2305,7 +2297,7 @@ class MangaPage(QWidget):
         self.geometry_done.clicked.connect(self.exit_geometry_mode)
         tools.addWidget(self.geometry_done)
         self.precise_divider = self.divider(tools)
-        self.tool_recognize = TransparentToolButton(FluentIcon.SEARCH, center)
+        self.tool_recognize = TransparentPushButton(FluentIcon.SEARCH, "识别", center)
         self.tool_recognize.setAccessibleName("识别")
         self.tool_recognize.setToolTip(
             "识别：无框时检测建框；有框时 OCR 当前页或选中的框。OCR 会更新未锁定的原文。"
@@ -2399,19 +2391,43 @@ class MangaPage(QWidget):
         text_header.addWidget(StrongBodyLabel("文字", right_card))
         text_header.addStretch(1)
         form.addRow(text_header)
-        for caption, field, lock in (
-            ("原文", self.source, self.source_lock),
-            ("译文", self.target, self.target_lock),
-        ):
-            label = QLabel(caption, right_card)
-            # 多行输入框比标签高得多，标签要对齐到首行文字而不是整行居中
-            label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-            label.setContentsMargins(0, 4, 0, 0)
-            text_row = QVBoxLayout()
-            text_row.setSpacing(4)
-            text_row.addWidget(field)
-            text_row.addWidget(lock)
-            form.addRow(label, text_row)
+        self.region_provider = QComboBox()
+        self.region_provider.addItem("默认激活接口", "")
+        self.region_provider.setMinimumWidth(110)
+        self.region_provider.setToolTip("选择本框翻译使用的接口（切换已有记录时直接显示）")
+        self.region_provider.currentIndexChanged.connect(
+            self.on_region_provider_changed
+        )
+        self.region_translate_btn = TransparentPushButton(
+            FluentIcon.SEND, "翻译", right_card
+        )
+        self.region_translate_btn.setToolTip("使用所选翻译源翻译或重新翻译当前框")
+        self.region_translate_btn.clicked.connect(self.translate_current_region)
+
+        source_label = QLabel("原文", right_card)
+        source_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        source_label.setContentsMargins(0, 4, 0, 0)
+        source_box = QVBoxLayout()
+        source_box.setSpacing(4)
+        source_box.addWidget(self.source)
+        source_actions = QHBoxLayout()
+        source_actions.setSpacing(6)
+        source_actions.addWidget(self.region_provider, 1)
+        source_actions.addWidget(self.region_translate_btn)
+        source_box.addLayout(source_actions)
+        form.addRow(source_label, source_box)
+
+        target_label = QLabel("译文", right_card)
+        target_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        target_label.setContentsMargins(0, 4, 0, 0)
+        form.addRow(target_label, self.target)
+
+        lock_row = QHBoxLayout()
+        lock_row.setSpacing(12)
+        lock_row.addWidget(self.source_lock)
+        lock_row.addWidget(self.target_lock)
+        lock_row.addStretch(1)
+        form.addRow(lock_row)
         # ==== 排版 ====
         typography_header = QHBoxLayout()
         typography_header.setContentsMargins(0, 12, 0, 2)
@@ -3088,12 +3104,22 @@ class MangaPage(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.update_header_compact()
         # zoom_overlay 是常驻浮层，改窗口大小后必须跟着重新贴角，
         # 否则它会停在旧位置、和新宽度错位。
         if getattr(self, "zoom_overlay", None) is not None:
             self.position_zoom_controls()
         if not self.progress_panel.isHidden():
             self.position_progress_panel()
+
+    def update_header_compact(self):
+        card = getattr(self, "command_card", None)
+        if card is None or not hasattr(self, "detector_label"):
+            return
+        width = card.width() or self.work_page.width() or self.width()
+        show_detector = width <= 0 or width >= 1140
+        self.detector_label.setVisible(show_detector)
+        self.detector.setVisible(show_detector)
         if getattr(self, "pan_hint", None) and not self.pan_hint.isHidden():
             self.position_pan_hint()
 
@@ -3911,14 +3937,44 @@ class MangaPage(QWidget):
 
     def refresh_providers(self):
         def loaded(result):
+            config = result.get("config", {})
+            platforms = config.get("platforms", {})
+            active_tag = config.get("target_platform", "")
             self.provider.blockSignals(True)
             selected = (self.document or {}).get("settings", {}).get("provider_id")
             self.provider.clear()
             self.provider.addItem("使用文本翻译当前接口", None)
-            for key, value in result.get("config", {}).get("platforms", {}).items():
+            for key, value in platforms.items():
                 self.provider.addItem(value.get("name", key), key)
             self.provider.setCurrentIndex(max(0, self.provider.findData(selected)))
             self.provider.blockSignals(False)
+
+            if hasattr(self, "region_provider"):
+                self.region_provider.blockSignals(True)
+                current_region_provider = (
+                    (self.region() or {}).get("translation_provider")
+                    or self.region_provider.currentData()
+                    or ""
+                )
+                self.region_provider.clear()
+                self.region_provider.addItem("默认激活接口", "")
+                ordered_keys = []
+                if active_tag and active_tag in platforms:
+                    ordered_keys.append(active_tag)
+                for key in platforms:
+                    if key not in ordered_keys:
+                        ordered_keys.append(key)
+                for key in ordered_keys:
+                    value = platforms[key]
+                    if value.get("enabled") is False:
+                        continue
+                    label = value.get("name", key)
+                    if key == active_tag:
+                        label = f"{label}（当前激活）"
+                    self.region_provider.addItem(label, key)
+                idx = self.region_provider.findData(current_region_provider)
+                self.region_provider.setCurrentIndex(max(0, idx))
+                self.region_provider.blockSignals(False)
 
         self.background(
             lambda: self.client.backend.request("GET", "/api/config"), loaded
@@ -4214,6 +4270,8 @@ class MangaPage(QWidget):
             self.rotation,
             self.source_lock,
             self.target_lock,
+            self.region_provider,
+            self.region_translate_btn,
         ):
             widget.setEnabled(bool(r))
         if not r:
@@ -4229,6 +4287,16 @@ class MangaPage(QWidget):
             self.source.setPlainText(r["source"])
         if self.target.toPlainText() != r["target"]:
             self.target.setPlainText(r["target"])
+        provider_key = r.get("translation_provider") or ""
+        if provider_key == "__default__":
+            provider_key = ""
+        if provider_key and self.region_provider.findData(provider_key) < 0:
+            self.region_provider.addItem(provider_key, provider_key)
+        self.region_provider.blockSignals(True)
+        self.region_provider.setCurrentIndex(
+            max(0, self.region_provider.findData(provider_key))
+        )
+        self.region_provider.blockSignals(False)
         s = r["style"]
         # 锁定开关回填时也要屏蔽信号，否则 setChecked 会把用户的锁定状态当成新编辑写回
         for widget, value in (
@@ -4593,6 +4661,9 @@ class MangaPage(QWidget):
         def action(t=target):
             t[field] = ""
             t["translation_state"], t["translation_error"] = "idle", ""
+            if field == "source":
+                t["translation_cache"] = {}
+                t["translation_provider"] = ""
 
         self.edit("清除此框" + ("译文" if field == "target" else "原文"), action)
         self.status.setText("已清除此框" + ("译文" if field == "target" else "原文") + "（可撤销）")
@@ -4601,12 +4672,81 @@ class MangaPage(QWidget):
         if self.region():
 
             def action():
-                self.region()[key] = value
+                region = self.region()
+                old_source = region.get("source")
+                region[key] = value
                 if key in {"source", "target"}:
-                    self.region()["translation_state"] = "idle"
-                    self.region()["translation_error"] = ""
+                    region["translation_state"] = "idle"
+                    region["translation_error"] = ""
+                if key == "source" and value != old_source:
+                    region["translation_cache"] = {}
+                    region["translation_provider"] = ""
 
             self.edit("修改文字框", action)
+
+    def on_region_provider_changed(self, *_):
+        if self.loading_form:
+            return
+        r = self.region()
+        if not r:
+            return
+        provider_id = self.region_provider.currentData() or ""
+        provider_key = provider_id or "__default__"
+        cache = r.get("translation_cache") or {}
+        entry = cache.get(provider_key)
+        if (
+            entry
+            and entry.get("source") == r.get("source", "")
+            and entry.get("target")
+            and not r.get("target_locked")
+        ):
+            cached_target = entry["target"]
+
+            def apply_cached():
+                region = self.region()
+                region["target"] = cached_target
+                region["translation_provider"] = provider_key
+                region["translation_state"] = "succeeded"
+                region["translation_error"] = ""
+
+            self.edit("切换翻译源结果", apply_cached)
+            self.target.blockSignals(True)
+            self.target.setPlainText(cached_target)
+            self.target.blockSignals(False)
+            self.draw_canvas()
+            self.status.setText("已切换为该翻译源的历史译文（未重复请求）")
+        else:
+            def set_provider():
+                self.region()["translation_provider"] = provider_key
+
+            self.edit("选择翻译源", set_provider)
+
+    def translate_current_region(self):
+        r = self.region()
+        if not r:
+            self.status.setText("请先选中文字框")
+            return
+        if not r.get("source", "").strip():
+            self.status.setText("当前框没有原文，请先识别或输入原文")
+            return
+        provider_id = self.region_provider.currentData() or None
+        provider_key = provider_id or "__default__"
+
+        def invalidate():
+            region = self.region()
+            cache = dict(region.get("translation_cache") or {})
+            cache.pop(provider_key, None)
+            region["translation_cache"] = cache
+            region["translation_provider"] = provider_key
+
+        self.edit("重译当前框", invalidate)
+        self.run(
+            "translate",
+            scope=0,
+            region_ids=[r["id"]],
+            replace=True,
+            provider_id=provider_id,
+        )
 
     def style_value(self, key, value):
         if self.region() and self.variant.currentData() not in ("edit",):

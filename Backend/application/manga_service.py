@@ -739,6 +739,8 @@ class MangaService:
                                     and live.ocr_rect == before.ocr_rect
                                 ):
                                     live.source = text
+                                    live.translation_cache = {}
+                                    live.translation_provider = ""
                                     live.warnings = (
                                         []
                                         if text.strip()
@@ -913,6 +915,7 @@ class MangaService:
             ),
         }
         provider_id = options.get("provider_id") or document.settings.provider_id
+        provider_key = provider_id or "__default__"
         if provider_id:
             config["provider_id"] = provider_id
         # 角色设定与跨框上下文：漫画的台词经常只写「他」「那家伙」，
@@ -956,6 +959,13 @@ class MangaService:
                         and region.target == before.target
                     ):
                         region.target = value
+                        cache = dict(region.translation_cache or {})
+                        cache[provider_key] = {
+                            "source": region.source,
+                            "target": value,
+                        }
+                        region.translation_cache = cache
+                        region.translation_provider = provider_key
                         applied.add(key)
                         region.translation_state, region.translation_error = (
                             "succeeded",
@@ -1341,6 +1351,8 @@ class MangaService:
                                 "idle",
                                 "",
                             )
+                            region.translation_cache = {}
+                            region.translation_provider = ""
             workspace = document
             if changed and not dry_run:
                 workspace = self.store.save(document, revision)
