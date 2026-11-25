@@ -1955,7 +1955,7 @@ class MangaPage(QWidget):
         self.size.setRange(6, 512)
         self.size.setValue(28)
         self.size.setSuffix(" px")
-        self.size.setFixedWidth(110)
+        self.size.setFixedWidth(128)
         self.size.setToolTip(
             "固定字号模式下生效；自动适配模式下字号随框自动调整"
         )
@@ -3128,8 +3128,8 @@ class MangaPage(QWidget):
             return
         width = card.width() or self.work_page.width() or self.width()
         show_detector = width <= 0 or width >= 1140
-        show_ocr = width <= 0 or width >= 920
-        show_summary = width <= 0 or width >= 780
+        show_ocr = width <= 0 or width >= 880
+        show_summary = width <= 0 or width >= 740
         self.detector_label.setVisible(show_detector)
         self.detector.setVisible(show_detector)
         if hasattr(self, "ocr_label"):
