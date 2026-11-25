@@ -1098,3 +1098,75 @@ def test_font_controls_and_progress_overlay_remain_accessible():
     assert editor.cancel_pending
     editor.submitting = False
     dispose_editor(editor)
+
+
+def test_progress_overlay_detect_ocr_notices_and_empty_page_numbers():
+    from PyQt5.QtTest import QTest
+
+    app = QApplication.instance()
+    editor = make_editor_for_actions()
+    editor.resize(1440, 1000)
+    editor.show()
+    app.processEvents()
+
+    pages = editor.document["pages"]
+    summary = editor.summarize_report(
+        {"empty_pages": [pages[0]["id"]], "errors": [], "warnings": []},
+        pages=pages,
+    )
+    assert "第 1 页未检出文字框" in summary
+    assert pages[0]["id"] not in summary
+
+    editor.progress_panel.start("正在提交任务…")
+    editor.progress_panel.update_progress(
+        "正在处理",
+        {
+            "stage": "ocr",
+            "model": "mangaocr",
+            "page_id": pages[0]["id"],
+            "page_index": 1,
+            "region_index": 1,
+            "region_total": 3,
+            "current": 1,
+            "total": 1,
+            "empty": True,
+        },
+        model_names={"mangaocr": "mangaOCR"},
+        page_numbers={pages[0]["id"]: 1},
+    )
+    editor.position_progress_panel()
+    assert "mangaOCR" in editor.progress_panel.title_label.text()
+    assert "OCR 1 / 3 框" in editor.progress_label.text()
+    assert "未识别出文字" in editor.progress_panel.notices_label.text()
+    assert not editor.progress_panel.geometry().intersects(
+        editor.zoom_overlay.geometry()
+    )
+
+    editor.current_job_stage = "detect"
+    editor.show_report(
+        {
+            "report": {
+                "completed": [],
+                "errors": [],
+                "warnings": [],
+                "empty_pages": [pages[0]["id"]],
+                "fallback_pages": [{"page_id": pages[0]["id"], "model": "manga-panel"}],
+            }
+        }
+    )
+    assert not editor.progress_panel.isHidden()
+    assert not editor.progress_panel.geometry().intersects(
+        editor.zoom_overlay.geometry()
+    )
+
+    # Space panning and Tab cycling on MangaCanvas
+    QTest.keyPress(editor.canvas, Qt.Key_Space)
+    assert editor.canvas.space_held
+    QTest.keyRelease(editor.canvas, Qt.Key_Space)
+    assert not editor.canvas.space_held
+
+    QTest.keyPress(editor.canvas, Qt.Key_Tab)
+    app.processEvents()
+    assert editor.selected == pages[0]["regions"][0]["id"]
+
+    dispose_editor(editor)

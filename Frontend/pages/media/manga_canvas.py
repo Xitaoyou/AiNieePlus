@@ -30,6 +30,9 @@ class RegionItem(QGraphicsRectItem):
         self.setZValue(2)
         self.resizing = False
 
+    def boundingRect(self):
+        return super().boundingRect().adjusted(-2, -22, 12, 10)
+
     def paint(self, painter, option, widget=None):
         if (
             self.canvas.live_layout
@@ -87,11 +90,24 @@ class RegionItem(QGraphicsRectItem):
             painter.setPen(QPen(QColor("#25b9e8"), 2))
         painter.drawRect(self.rect())
         badge = {"ocr_rect": " 取字", "erase_rect": " 去字"}.get(self.rect_key, "")
-        painter.drawText(
-            self.rect().adjusted(4, 0, -4, 0),
-            Qt.AlignTop | Qt.AlignLeft,
-            str(self.region.get("order", 0) + 1) + badge,
+        label = str(self.region.get("order", 0) + 1) + badge
+        badge_color = painter.pen().color()
+        metrics = painter.fontMetrics()
+        pill_w = max(18, metrics.horizontalAdvance(label) + 10)
+        pill_h = 16
+        pill_y = -pill_h - 2 if self.pos().y() >= pill_h + 2 else 2
+        pill_rect = QRectF(0, pill_y, pill_w, pill_h)
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(badge_color)
+        painter.drawRoundedRect(pill_rect, 4, 4)
+        painter.setPen(
+            QColor("#1a1a1a")
+            if badge_color == QColor("#ffbc42")
+            else QColor("#ffffff")
         )
+        painter.drawText(pill_rect, Qt.AlignCenter, label)
+        painter.restore()
         if self.isSelected():
             painter.fillRect(
                 QRectF(self.rect().width() - 8, self.rect().height() - 8, 8, 8),
@@ -171,6 +187,7 @@ class MangaCanvas(QGraphicsView):
     escapeRequested = pyqtSignal()
     panStarted = pyqtSignal()
     panFinished = pyqtSignal()
+    cycleRegionRequested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -187,6 +204,7 @@ class MangaCanvas(QGraphicsView):
         qconfig.themeChanged.connect(self.apply_theme)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.pan_origin = None
+        self.space_held = False
         self.last_clicked = ""
         self.box_preview = None
         self.live_layout = False
@@ -328,7 +346,9 @@ class MangaCanvas(QGraphicsView):
         super().contextMenuEvent(event)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MiddleButton:
+        if event.button() == Qt.MiddleButton or (
+            event.button() == Qt.LeftButton and self.space_held
+        ):
             self.pan_origin = event.pos()
             self.setCursor(Qt.ClosedHandCursor)
             self.panStarted.emit()
@@ -408,7 +428,10 @@ class MangaCanvas(QGraphicsView):
     def mouseReleaseEvent(self, event):
         if self.pan_origin is not None:
             self.pan_origin = None
-            self.unsetCursor()
+            if self.space_held:
+                self.setCursor(Qt.OpenHandCursor)
+            else:
+                self.unsetCursor()
             self.panFinished.emit()
             return
         if self.start is not None:
@@ -454,6 +477,20 @@ class MangaCanvas(QGraphicsView):
         self.lines = []
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            if not event.isAutoRepeat():
+                self.space_held = True
+                if self.pan_origin is None:
+                    self.setCursor(Qt.OpenHandCursor)
+            event.accept()
+            return
+        if event.key() in {Qt.Key_Tab, Qt.Key_Backtab}:
+            backward = event.key() == Qt.Key_Backtab or bool(
+                event.modifiers() & Qt.ShiftModifier
+            )
+            self.cycleRegionRequested.emit(-1 if backward else 1)
+            event.accept()
+            return
         if event.key() in {Qt.Key_V, Qt.Key_B} and not event.modifiers():
             self.modeRequested.emit(0 if event.key() == Qt.Key_V else 1)
             return
@@ -477,3 +514,12 @@ class MangaCanvas(QGraphicsView):
             self.deleteRequested.emit()
         else:
             super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Space and not event.isAutoRepeat():
+            self.space_held = False
+            if self.pan_origin is None:
+                self.unsetCursor()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)

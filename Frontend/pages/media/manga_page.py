@@ -107,6 +107,7 @@ from qfluentwidgets import (
 from PyQt5.QtWidgets import QScrollArea as NativeScrollArea
 
 from Frontend.pages.media.manga_canvas import MangaCanvas
+from Frontend.pages.media.manga_progress_overlay import MangaProgressOverlay
 from Frontend.pages.media.start_page import MediaStartPage
 from Frontend.services.manga_client import MangaClient
 from Frontend.services.manga_edits import apply as apply_changes
@@ -2167,14 +2168,20 @@ class MangaPage(QWidget):
                 triggered=lambda: PunctuationRulesDialog(self).exec(),
             )
         )
-        self.cancel_button = self.icon_button(
-            commands, FluentIcon.CLOSE, "取消当前任务", self.cancel_job
-        )
+        self.cancel_button = TransparentToolButton(FluentIcon.CLOSE, self)
+        self.cancel_button.setToolTip("取消当前任务")
+        self.cancel_button.clicked.connect(self.cancel_job)
         for sequence, callback in [
             ("Ctrl+S", self.save),
             ("Ctrl+Z", self.undo.undo),
             ("Ctrl+Y", self.undo.redo),
             ("Ctrl+Shift+Z", self.undo.redo),
+            ("PageUp", lambda: self.step_page(-1)),
+            ("PageDown", lambda: self.step_page(1)),
+            ("Ctrl+0", self.fit_canvas),
+            ("Ctrl+=", lambda: self.step_zoom(1.15)),
+            ("Ctrl++", lambda: self.step_zoom(1.15)),
+            ("Ctrl+-", lambda: self.step_zoom(1 / 1.15)),
         ]:
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -2310,6 +2317,7 @@ class MangaPage(QWidget):
         self.canvas.modeRequested.connect(self.tool.setCurrentIndex)
         self.canvas.geometryEscapeRequested.connect(self.exit_geometry_mode)
         self.canvas.escapeRequested.connect(self.clear_selection)
+        self.canvas.cycleRegionRequested.connect(self.cycle_region)
         # 画布右下角统一：视图切换 + 适应窗口 + 缩放
         self.zoom_overlay = SimpleCardWidget(self.canvas.viewport())
         zoom_row = QHBoxLayout(self.zoom_overlay)
@@ -2330,7 +2338,7 @@ class MangaPage(QWidget):
         self.pan_hint = SimpleCardWidget(self.canvas.viewport())
         pan_row = QHBoxLayout(self.pan_hint)
         pan_row.setContentsMargins(10, 6, 10, 6)
-        self.pan_hint_label = QLabel("按住鼠标中键拖动画面")
+        self.pan_hint_label = QLabel("按住空格键或鼠标中键拖动画面")
         pan_row.addWidget(self.pan_hint_label)
         self.pan_hint.adjustSize()
         self.pan_hint.hide()
@@ -2514,22 +2522,14 @@ class MangaPage(QWidget):
         split.setStretchFactor(1, 1)
         split.setStretchFactor(2, 0)
         split.setSizes([180, 1, 380])
-        # ==== 任务进度面板（画布右下角浮动，随时可取消）====
-        self.progress_label = QLabel("尚未开始翻译")
-        self.progress_label.setWordWrap(True)
-        self.progress_label.setMaximumWidth(220)
-        self.progress_label.setMinimumWidth(120)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_panel = SimpleCardWidget(self.canvas.viewport())
-        progress_row = QHBoxLayout(self.progress_panel)
-        progress_row.setContentsMargins(12, 8, 12, 8)
-        progress_row.setSpacing(8)
-        progress_row.addWidget(self.progress_label, 1)
-        progress_row.addWidget(self.progress_bar, 1)
-        progress_row.addWidget(self.cancel_button)
-        self.progress_panel.hide()
+        # ==== 任务进度面板（画布右下角浮动，统一承载进度与模型/OCR通知）====
+        self.progress_panel = MangaProgressOverlay(
+            self.canvas.viewport(), cancel_button=self.cancel_button
+        )
+        self.progress_label = self.progress_panel.progress_label
+        self.progress_bar = self.progress_panel.progress_bar
+        self.progress_panel.detailsRequested.connect(self.show_task_details)
+        self.progress_panel.layoutChanged.connect(self.position_progress_panel)
         self.last_report = {}
         self.failed_region_ids = []
         # 状态栏属于工作页：挂到 outer 上的话，起始页底部也会显示
@@ -2883,6 +2883,36 @@ class MangaPage(QWidget):
         self._zoom_percent = 0
         self.update_zoom(self.canvas.transform().m11())
 
+    def step_zoom(self, factor):
+        if not self.document:
+            return
+        current = self.canvas.transform().m11() * 100
+        self.set_zoom(round(current * factor))
+        self.update_zoom(self.canvas.transform().m11())
+
+    def step_page(self, delta):
+        if not self.document or not self.document.get("pages"):
+            return
+        row = self.pages.currentRow()
+        if row < 0:
+            row = 0
+        target = max(0, min(len(self.document["pages"]) - 1, row + delta))
+        if target != row:
+            self.pages.setCurrentRow(target)
+
+    def cycle_region(self, step):
+        page = self.page()
+        if not page or not page.get("regions"):
+            return
+        ordered = sorted(page["regions"], key=lambda r: r.get("order", 0))
+        ids = [r["id"] for r in ordered]
+        if self.selected in ids:
+            idx = (ids.index(self.selected) + step) % len(ids)
+        else:
+            idx = 0 if step >= 0 else len(ids) - 1
+        self.select_region(ids[idx])
+        self.draw_canvas()
+
     ZOOM_MIN = 5
     ZOOM_MAX = 800
 
@@ -2970,14 +3000,17 @@ class MangaPage(QWidget):
         if now - getattr(self, "_pan_hint_at", 0.0) < 8:
             return
         self._pan_hint_at = now
-        self.pan_hint_label.setText("按住鼠标中键拖动画面")
+        self.pan_hint_label.setText("按住空格键或鼠标中键拖动画面")
         self.pan_hint.show()
         self.position_pan_hint()
         QTimer.singleShot(3200, self.pan_hint.hide)
 
     def position_progress_panel(self):
         viewport = self.canvas.viewport()
-        self.progress_panel.setMaximumWidth(max(200, viewport.width() - 20))
+        max_w = min(400, max(240, viewport.width() - 20))
+        min_w = min(260, max_w)
+        self.progress_panel.setMinimumWidth(min_w)
+        self.progress_panel.setMaximumWidth(max_w)
         self.progress_panel.adjustSize()
         self.progress_panel.move(
             max(0, min(viewport.width() - self.progress_panel.width() - 10, viewport.width())),
@@ -3392,33 +3425,16 @@ class MangaPage(QWidget):
     def show_task_details(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("漫画翻译 · 进度与失败明细")
-        dialog.resize(760, 500)
+        dialog.resize(780, 520)
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel(self.progress_label.text()))
         table = QTableWidget()
         table.setColumnCount(4)
-        table.setHorizontalHeaderLabels(["页面", "文字框", "状态", "失败原因"])
-        rows = [
-            (p, r)
-            for p in (self.document or {}).get("pages", [])
-            for r in p["regions"]
-            if r.get("translation_state") != "idle"
-        ]
-        pages = {p["id"]: p for p in (self.document or {}).get("pages", [])}
-        for error in getattr(self, "last_task_report", {}).get("errors", []):
-            page = pages.get(error.get("page_id"), {"id": "", "name": "任务"})
-            rows.append(
-                (
-                    page,
-                    {
-                        "id": None,
-                        "order": -1,
-                        "translation_state": "failed",
-                        "translation_error": error.get("message", str(error)),
-                    },
-                )
-            )
-        table.setRowCount(len(rows))
+        table.setHorizontalHeaderLabels(["页面", "文字框", "状态", "明细 / 原因"])
+        rows = []
+        seen_regions = set()
+        pages_list = (self.document or {}).get("pages", [])
+        pages = {p["id"]: p for p in pages_list}
         states = {
             "pending": "等待翻译",
             "succeeded": "成功",
@@ -3426,14 +3442,66 @@ class MangaPage(QWidget):
             "cancelled": "已取消",
             "idle": "未开始",
         }
-        for i, (p, r) in enumerate(rows):
+        for p in pages_list:
+            for r in p["regions"]:
+                t_state = r.get("translation_state", "idle")
+                warnings = [str(w).strip() for w in (r.get("warnings") or []) if str(w).strip()]
+                if t_state != "idle" or warnings:
+                    seen_regions.add(r["id"])
+                    detail = r.get("translation_error", "")
+                    if warnings:
+                        warn_text = "；".join(warnings)
+                        detail = f"{detail}；{warn_text}" if detail else warn_text
+                    status_text = states.get(t_state, "未开始")
+                    if t_state == "idle" and warnings:
+                        status_text = "需检查"
+                    rows.append((p, r, status_text, detail))
+        last_report = getattr(self, "last_task_report", {}) or {}
+        for error in last_report.get("errors", []):
+            page = pages.get(error.get("page_id"), {"id": "", "name": "任务"})
+            rows.append(
+                (
+                    page,
+                    {"id": None, "order": -1},
+                    "失败",
+                    error.get("message", str(error)),
+                )
+            )
+        for page_id in last_report.get("empty_pages", []) or []:
+            page = pages.get(page_id, {"id": page_id, "name": str(page_id)})
+            rows.append(
+                (
+                    page,
+                    {"id": None, "order": -1},
+                    "未检出",
+                    "未检出文字框：可降低检测阈值或更换检测模型",
+                )
+            )
+        for item in last_report.get("fallback_pages", []) or []:
+            page = pages.get(item.get("page_id"), {"id": "", "name": "页面"})
+            rows.append(
+                (
+                    page,
+                    {"id": None, "order": -1},
+                    "已补检",
+                    f"由 {item.get('model', '')} 回退到行级检测补出文字框",
+                )
+            )
+        for item in last_report.get("skipped_pages", []) or []:
+            page = pages.get(item.get("page_id"), {"id": "", "name": "页面"})
+            rows.append(
+                (
+                    page,
+                    {"id": None, "order": -1},
+                    "已跳过",
+                    item.get("message", "已有文字框，已跳过检测"),
+                )
+            )
+        table.setRowCount(len(rows))
+        for i, (p, r, status_text, detail_text) in enumerate(rows):
+            box_label = str(r["order"] + 1) if r.get("order", -1) >= 0 else "-"
             for j, value in enumerate(
-                [
-                    p["name"],
-                    str(r["order"] + 1),
-                    states.get(r.get("translation_state"), "未开始"),
-                    r.get("translation_error", ""),
-                ]
+                [p["name"], box_label, status_text, detail_text]
             ):
                 table.setItem(i, j, QTableWidgetItem(value))
         table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -3454,7 +3522,8 @@ class MangaPage(QWidget):
         )
         if index >= 0:
             self.pages.setCurrentRow(index)
-            self.select_region(region_id)
+            if region_id:
+                self.select_region(region_id)
             self.draw_canvas()
 
     @staticmethod
@@ -5055,10 +5124,7 @@ class MangaPage(QWidget):
         self.job_manual_paths = set()
         session = self.session
         self.status.setText("正在提交任务…")
-        self.progress_label.setText("正在提交任务…")
-        self.progress_bar.setRange(0, 0)
-        self.cancel_button.show()
-        self.progress_panel.show()
+        self.progress_panel.start("正在提交任务…")
         self.position_progress_panel()
 
         def started(result):
@@ -5137,19 +5203,21 @@ class MangaPage(QWidget):
             if progress.get("error_requests"):
                 detail += f" · 失败 {progress['error_requests']} 次"
             self.status.setText(state + (" · " + detail if detail else ""))
-            total = progress.get("total", progress.get("total_line", 0))
-            current = progress.get("current", progress.get("line", 0))
-            if total:
-                self.progress_bar.setRange(0, total)
-                self.progress_bar.setValue(current)
-            self.progress_label.setText(
-                state
-                + (" · " + detail if detail else "")
-                + (
-                    f" · 已请求 {progress['total_requests']} 次"
-                    if "total_requests" in progress
-                    else ""
-                )
+            model_names = {
+                m["id"]: m.get("name", m["id"])
+                for m in (getattr(self, "model_catalogue", None) or [])
+                if m.get("id")
+            }
+            page_numbers = (
+                {p["id"]: i + 1 for i, p in enumerate(self.document["pages"])}
+                if self.document
+                else {}
+            )
+            self.progress_panel.update_progress(
+                state,
+                progress,
+                model_names=model_names,
+                page_numbers=page_numbers,
             )
             if job["state"] in {
                 "succeeded",
@@ -5160,35 +5228,36 @@ class MangaPage(QWidget):
             }:
                 self.poll_timer.stop()
                 self.job_id = None
-                self.progress_panel.hide()
                 self.follow_banner.hide()
-                self.progress_bar.setRange(0, 100)
-                if job["state"] == "succeeded":
-                    self.progress_bar.setValue(100)
-                else:
-                    self.progress_label.setText(state + " · 可查看明细或重试失败文字框")
                 result = job.get("result") or {}
                 if isinstance(result, dict) and "workspace" in result:
                     self.job_callback(result)
                     if self.dirty:
                         self.save_timer.start()
                 elif job["state"] == "succeeded" and isinstance(result.get("models"), list):
+                    self.progress_panel.hide()
                     self.job_callback(result)
                 elif getattr(self, "job_error_callback", None):
+                    self.progress_panel.hide()
                     self.job_error_callback(job.get("error") or state)
                 else:
                     # 状态是 succeeded 但没带回 workspace：以前会拿 {} 直接回调，
                     # completed() 里 result["workspace"] 抛 KeyError 又被兜住，
                     # 任务成果就这样丢了，界面只显示「界面更新失败」。
-                    self.status.setText(
-                        str(
-                            job.get("error")
-                            or (
-                                "任务已结束但未返回工程快照，正在按磁盘内容恢复"
-                                if job["state"] == "succeeded"
-                                else "任务已取消，可重新执行失败阶段"
-                            )
+                    message = str(
+                        job.get("error")
+                        or (
+                            "任务已结束但未返回工程快照，正在按磁盘内容恢复"
+                            if job["state"] == "succeeded"
+                            else "任务已取消，可重新执行失败阶段"
                         )
+                    )
+                    self.status.setText(message)
+                    self.progress_panel.finish(
+                        "error" if job["state"] == "failed" else "warn",
+                        state,
+                        message,
+                        auto_hide_ms=0,
                     )
                     if self.document:
                         self.recover_workspace(record_base=self.job_base)
@@ -5293,10 +5362,13 @@ class MangaPage(QWidget):
             )
 
     @staticmethod
-    def summarize_report(report):
+    def summarize_report(report, pages=None):
         # 逐页提示合并成带计数的摘要，避免同一句话刷满状态栏
         from collections import Counter
 
+        page_index = {
+            p["id"]: i + 1 for i, p in enumerate(pages or []) if isinstance(p, dict) and "id" in p
+        }
         parts = []
         messages = [str(e.get("message", e)) for e in report.get("errors", [])]
         if messages:
@@ -5304,7 +5376,8 @@ class MangaPage(QWidget):
             parts.append(top + (f"（{count} 处）" if count > 1 else ""))
         empty = report.get("empty_pages") or []
         if empty:
-            numbers = "、".join(str(n) for n in empty[:4])
+            labels = [str(page_index.get(pid, pid)) for pid in empty[:4]]
+            numbers = "、".join(labels)
             suffix = f" 等 {len(empty)}" if len(empty) > 4 else ""
             parts.append(
                 f"第 {numbers}{suffix} 页未检出文字框：可降低检测阈值或换检测模型"
@@ -5328,6 +5401,19 @@ class MangaPage(QWidget):
     def show_report(self, result):
         report = result.get("report", {})
         self.last_task_report = deepcopy(report)
+        pages = (self.document or {}).get("pages", [])
+        stage = getattr(self, "current_job_stage", "")
+        stage_done_titles = {
+            "detect": "检测完成",
+            "ocr": "OCR 识别完成",
+            "recognize": "检测并 OCR 完成",
+            "translate": "翻译完成",
+            "clean": "精准去字完成",
+            "render": "排版渲染完成",
+            "pipeline": "翻译并排版完成",
+        }
+        title = stage_done_titles.get(stage, "处理完成")
+        detail = ""
         if "translation" in report:
             self.last_report = report["translation"]
             translation = self.last_report
@@ -5341,23 +5427,56 @@ class MangaPage(QWidget):
             ]
             self.progress_bar.setRange(0, max(1, total))
             self.progress_bar.setValue(succeeded + translation.get("skipped", 0))
-            self.progress_label.setText(
-                f"翻译完成 · 成功 {succeeded} 框 · 失败 {failed} 框 · 跳过 {translation.get('skipped', 0)} 框"
+            detail = (
+                f"成功 {succeeded} 框 · 失败 {failed} 框 · 跳过 {translation.get('skipped', 0)} 框"
                 if total
                 else "没有需要翻译的原文；请先 OCR，已有译文默认保留"
             )
+        else:
+            completed = len(report.get("completed") or [])
+            detail = f"已完成 {completed} 页处理" if completed else "处理完成"
+
         errors = report.get("errors") or []
         warnings = report.get("warnings") or []
         empty = report.get("empty_pages") or []
+        fallback = report.get("fallback_pages") or []
+        skipped = report.get("skipped_pages") or []
+        ocr_empty_count = sum(
+            1
+            for p in pages
+            for r in p.get("regions", [])
+            if any("OCR 未识别出文字" in str(w) for w in (r.get("warnings") or []))
+        )
+        notices = []
         if errors:
+            notices.append(f"失败 {len(errors)} 项：{errors[0].get('message', errors[0])}")
+        if empty:
+            page_index = {p["id"]: i + 1 for i, p in enumerate(pages)}
+            labels = "、".join(str(page_index.get(pid, pid)) for pid in empty[:4])
+            suffix = f" 等 {len(empty)}" if len(empty) > 4 else ""
+            notices.append(f"第 {labels}{suffix} 页未检出文字框（可降低阈值或换检测模型）")
+        if fallback:
+            notices.append(f"{len(fallback)} 页由面板模型回退到行级检测补出文字框")
+        if skipped:
+            notices.append(f"{len(skipped)} 页已有文字框，已跳过检测")
+        if ocr_empty_count and stage in {"ocr", "recognize"}:
+            notices.append(f"{ocr_empty_count} 个文字框 OCR 未识别出文字")
+        elif warnings and not errors:
+            notices.append(f"{len(warnings)} 条提示：{warnings[0].get('message', warnings[0])}")
+
+        if errors:
+            tone = "error"
             self.set_status_tone("error")
-        elif warnings or empty:
+        elif warnings or empty or fallback or (ocr_empty_count and stage in {"ocr", "recognize"}):
+            tone = "warn"
             self.set_status_tone("warn")
         else:
+            tone = "ok"
             self.set_status_tone("ok")
-        self.status.setText(
-            self.summarize_report(report) or "处理完成，请校对后继续"
-        )
+
+        summary = self.summarize_report(report, pages=pages)
+        self.status.setText(summary or "处理完成，请校对后继续")
+        self.progress_panel.finish(tone, title, detail, notices=notices)
 
     def export(self):
         if not self.document:

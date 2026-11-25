@@ -328,12 +328,16 @@ class MangaService:
             for index, page in enumerate(pages):
                 from dataclasses import replace
 
-                def progress(value, index=index, page_id=page.id):
+                def progress(
+                    value, index=index, page_id=page.id, page_name=page.name
+                ):
                     if context.on_progress:
                         context.on_progress(
                             {
                                 **value,
                                 "page_id": page_id,
+                                "page_index": index + 1,
+                                "page_name": page_name,
                                 "current": index + 1,
                                 "total": len(pages),
                             }
@@ -357,6 +361,8 @@ class MangaService:
                         {
                             "stage": "recognize",
                             "page_id": page.id,
+                            "page_index": index + 1,
+                            "page_name": page.name,
                             "current": index + 1,
                             "total": len(pages),
                         }
@@ -427,6 +433,19 @@ class MangaService:
                                 "MANGA_LOCKED", "页面存在锁定文字框，不能整页替换", 409
                             )
                         folder = self.models.folder(document.settings.detector)
+                        if context.on_progress:
+                            context.on_progress(
+                                {
+                                    "stage": "detect",
+                                    "phase": "running",
+                                    "model": document.settings.detector,
+                                    "page_id": page.id,
+                                    "page_index": index + 1,
+                                    "page_name": page.name,
+                                    "current": index,
+                                    "total": len(pages),
+                                }
+                            )
                         results = self.compute(
                             context,
                             operation="detect",
@@ -504,12 +523,55 @@ class MangaService:
                                     "model": detector,
                                 }
                             )
+                            if context.on_progress:
+                                context.on_progress(
+                                    {
+                                        "stage": "detect",
+                                        "phase": "fallback",
+                                        "event": "fallback",
+                                        "model": detector,
+                                        "added": len(extra),
+                                        "page_id": page.id,
+                                        "page_index": index + 1,
+                                        "page_name": page.name,
+                                        "current": index + 1,
+                                        "total": len(pages),
+                                    }
+                                )
                         if not results:
                             report.setdefault("empty_pages", []).append(page.id)
+                            if context.on_progress:
+                                context.on_progress(
+                                    {
+                                        "stage": "detect",
+                                        "phase": "empty",
+                                        "event": "empty",
+                                        "model": detector,
+                                        "page_id": page.id,
+                                        "page_index": index + 1,
+                                        "page_name": page.name,
+                                        "current": index + 1,
+                                        "total": len(pages),
+                                    }
+                                )
                             continue
                         if not any(d["class_id"] == 1 for d in results):
                             # 回退也拿不到文字框：保留面板结果，但明确告知没检出文字。
                             report.setdefault("empty_pages", []).append(page.id)
+                            if context.on_progress:
+                                context.on_progress(
+                                    {
+                                        "stage": "detect",
+                                        "phase": "empty",
+                                        "event": "empty",
+                                        "model": detector,
+                                        "page_id": page.id,
+                                        "page_index": index + 1,
+                                        "page_name": page.name,
+                                        "current": index + 1,
+                                        "total": len(pages),
+                                    }
+                                )
                         page.panels = (
                             [
                                 {
@@ -616,12 +678,31 @@ class MangaService:
                                     "当前系统不支持该系统 OCR 引擎",
                                     409,
                                 )
-                        for region in selected:
+                        pending_regions = [
+                            r
+                            for r in selected
+                            if not (
+                                r.source_locked
+                                or (r.source and not options.get("overwrite_source"))
+                            )
+                        ]
+                        if pending_regions and context.on_progress:
+                            context.on_progress(
+                                {
+                                    "stage": "ocr",
+                                    "phase": "running",
+                                    "model": engine_id,
+                                    "page_id": page.id,
+                                    "page_index": index + 1,
+                                    "page_name": page.name,
+                                    "region_index": 0,
+                                    "region_total": len(pending_regions),
+                                    "current": index + 1,
+                                    "total": len(pages),
+                                }
+                            )
+                        for r_index, region in enumerate(pending_regions):
                             self.cancelled(context)
-                            if region.source_locked or (
-                                region.source and not options.get("overwrite_source")
-                            ):
-                                continue
                             r = region.ocr_rect
                             before = region.model_copy(deep=True)
                             text = self.compute(
@@ -677,8 +758,15 @@ class MangaService:
                                 context.on_progress(
                                     {
                                         "stage": "ocr",
+                                        "phase": "running",
+                                        "model": engine_id,
                                         "page_id": page_id,
+                                        "page_index": index + 1,
+                                        "page_name": page.name,
                                         "region_id": before.id,
+                                        "region_index": r_index + 1,
+                                        "region_total": len(pending_regions),
+                                        "empty": not text.strip(),
                                         "current": index + 1,
                                         "total": len(pages),
                                     }
@@ -734,7 +822,14 @@ class MangaService:
                     context.on_progress(
                         {
                             "stage": operation,
+                            "model": document.settings.detector
+                            if operation == "detect"
+                            else document.settings.ocr
+                            if operation == "ocr"
+                            else "",
                             "page_id": page_id,
+                            "page_index": index + 1,
+                            "page_name": page.name,
                             "current": index + 1,
                             "total": len(pages),
                         }

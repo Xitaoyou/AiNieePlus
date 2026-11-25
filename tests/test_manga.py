@@ -628,3 +628,43 @@ def test_background_editing_does_not_bake_translated_layers(workspace, monkeypat
     assert (directory / f"{page.id}.bg-key.clean.png").exists()
     assert not (directory / f"{page.id}.final-key.render.png").exists()
     assert not (directory / f"{page.id}.final-key.layer.png").exists()
+
+
+def test_recognize_emits_fine_grained_detect_and_ocr_progress(workspace, monkeypatch):
+    store, doc = workspace
+    for page in doc.pages:
+        page.regions = []
+    doc = store.save(doc, doc.revision)
+    service = MangaService(store, StubModels())
+
+    def compute(context, **kw):
+        if kw["operation"] == "detect":
+            return [
+                {"rect": [10, 10, 80, 40], "score": 0.9, "class_id": 1},
+                {"rect": [10, 80, 80, 40], "score": 0.8, "class_id": 1},
+            ]
+        if kw["operation"] == "ocr":
+            return "" if kw["rect"][1] > 50 else "こんにちは"
+        raise AssertionError(kw)
+
+    monkeypatch.setattr(service, "compute", compute)
+    events = []
+    result = service.run(
+        doc.id, "recognize", context=ExecutionContext(on_progress=events.append)
+    )
+    assert not result["report"]["errors"]
+    detect_pre = [
+        e for e in events if e.get("stage") == "detect" and e.get("phase") == "running"
+    ]
+    assert detect_pre and all(e.get("model") == "manga-panel" and e.get("page_index") for e in detect_pre)
+    ocr_events = [
+        e for e in events if e.get("stage") == "ocr" and e.get("region_id")
+    ]
+    assert ocr_events
+    assert all(
+        e.get("model") == "mangaocr"
+        and e.get("region_total") == 2
+        and e.get("region_index") in {1, 2}
+        for e in ocr_events
+    )
+    assert any(e.get("empty") is True for e in ocr_events)
