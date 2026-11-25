@@ -1774,12 +1774,26 @@ class MangaPage(QWidget):
             "rgba(255, 255, 255, 0.14)" if dark else "rgba(0, 0, 0, 0.10)"
         )
         overlay_text = "#f3f3f3" if dark else "#1f1f1f"
+        sb_handle = "rgba(255, 255, 255, 0.22)" if dark else "rgba(0, 0, 0, 0.20)"
+        sb_hover = "rgba(255, 255, 255, 0.38)" if dark else "rgba(0, 0, 0, 0.36)"
         self.setStyleSheet(
             f"QWidget#manga_translation_page {{background:{background};}}"
             f"SimpleCardWidget#mangaZoomOverlay, SimpleCardWidget#mangaPanHint {{"
             f"background-color:{overlay_bg};border:1px solid {overlay_border};border-radius:10px;}}"
             f"SimpleCardWidget#mangaZoomOverlay QLabel, SimpleCardWidget#mangaPanHint QLabel {{"
             f"color:{overlay_text};background:transparent;}}"
+            f"QScrollArea#mangaRightScroll {{border:none;background:transparent;}}"
+            f"QScrollArea#mangaRightScroll > QWidget > QWidget {{background:transparent;}}"
+            f"QScrollArea#mangaRightScroll QScrollBar:vertical {{background:transparent;width:6px;margin:4px 0;}}"
+            f"QScrollArea#mangaRightScroll QScrollBar::handle:vertical {{background:{sb_handle};border-radius:3px;min-height:28px;}}"
+            f"QScrollArea#mangaRightScroll QScrollBar::handle:vertical:hover {{background:{sb_hover};}}"
+            f"QScrollArea#mangaRightScroll QScrollBar::add-line:vertical, QScrollArea#mangaRightScroll QScrollBar::sub-line:vertical {{height:0px;border:none;background:none;}}"
+            f"QScrollArea#mangaRightScroll QScrollBar::add-page:vertical, QScrollArea#mangaRightScroll QScrollBar::sub-page:vertical {{background:none;}}"
+            f"QScrollArea#mangaRightScroll QScrollBar:horizontal {{background:transparent;height:6px;margin:0 4px;}}"
+            f"QScrollArea#mangaRightScroll QScrollBar::handle:horizontal {{background:{sb_handle};border-radius:3px;min-width:28px;}}"
+            f"QScrollArea#mangaRightScroll QScrollBar::handle:horizontal:hover {{background:{sb_hover};}}"
+            f"QScrollArea#mangaRightScroll QScrollBar::add-line:horizontal, QScrollArea#mangaRightScroll QScrollBar::sub-line:horizontal {{width:0px;border:none;background:none;}}"
+            f"QScrollArea#mangaRightScroll QScrollBar::add-page:horizontal, QScrollArea#mangaRightScroll QScrollBar::sub-page:horizontal {{background:none;}}"
         )
         palette = self.palette()
         palette.setColor(
@@ -1790,6 +1804,7 @@ class MangaPage(QWidget):
             self.progress_panel.apply_theme()
 
     def build_ui(self):
+        self.setMinimumWidth(0)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -1940,7 +1955,7 @@ class MangaPage(QWidget):
         self.size.setRange(6, 512)
         self.size.setValue(28)
         self.size.setSuffix(" px")
-        self.size.setFixedWidth(140)
+        self.size.setFixedWidth(110)
         self.size.setToolTip(
             "固定字号模式下生效；自动适配模式下字号随框自动调整"
         )
@@ -2049,6 +2064,8 @@ class MangaPage(QWidget):
 
         # ---- 统一顶栏：返回 + 菜单 + 项目设置/模型 + 一键翻译 ----
         command_card = SimpleCardWidget(self.work_page)
+        command_card.setMinimumWidth(0)
+        command_card.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.command_card = command_card
         commands = QHBoxLayout(command_card)
         self.commands_layout = commands
@@ -2240,6 +2257,7 @@ class MangaPage(QWidget):
         split.splitterMoved.connect(self.update_page_labels)
         # 中：画布 + 区域编辑横幅
         center = SimpleCardWidget()
+        center.setMinimumWidth(160)
         center.setBorderRadius(12)
         center_layout = QVBoxLayout(center)
         tools = QHBoxLayout()
@@ -2284,11 +2302,11 @@ class MangaPage(QWidget):
         self.geometry.currentIndexChanged.connect(self.change_geometry)
         self.geometry_hint = QLabel("拖框移动 · 滚轮缩放 · 右键更多")
         self.geometry_hint.setWordWrap(False)
-        self.geometry_hint.setMinimumWidth(120)
+        self.geometry_hint.setMinimumWidth(0)
         self.geometry_hint.setMaximumHeight(32)
         self.geometry_hint.setTextInteractionFlags(Qt.NoTextInteraction)
         self.geometry_hint.setSizePolicy(
-            QSizePolicy.Preferred, QSizePolicy.Preferred
+            QSizePolicy.Ignored, QSizePolicy.Preferred
         )
         tools.addWidget(self.geometry_hint, 1)
         self.geometry_done = TransparentToolButton(FluentIcon.ACCEPT_MEDIUM, center)
@@ -2368,18 +2386,10 @@ class MangaPage(QWidget):
         # 用原生 QScrollArea：qfluentwidgets 的 SingleDirectionScrollArea
         # 强制横向 AlwaysOff，右栏变窄时内容会被裁掉而不是出现横向滚动条。
         scroll = NativeScrollArea()
+        scroll.setObjectName("mangaRightScroll")
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(360)
+        scroll.setMinimumWidth(280)
         scroll.setMaximumWidth(560)
-        scroll.setWidgetResizable(True)
-        # 只给 QScrollArea 本身设 background:transparent 不够：viewport 是它的
-        # 子 QWidget，会按应用调色板的 Base（永远是白色）自绘底色，暗色主题下
-        # 整条右栏就变成白底，上面白色的标签全看不见。子选择器要把 viewport
-        # 和卡片一起改成透明，露出页面的主题底色。
-        scroll.setStyleSheet(
-            "QScrollArea {border:none;background:transparent;}"
-            "QScrollArea > QWidget > QWidget {background:transparent;}"
-        )
         right_card = SimpleCardWidget()
         right_card.setBorderRadius(12)
         form = QFormLayout(right_card)
@@ -2442,7 +2452,7 @@ class MangaPage(QWidget):
         form.addRow(mode_row)
         font_row = QHBoxLayout()
         font_row.setSpacing(6)
-        self.font.setMinimumWidth(120)
+        self.font.setMinimumWidth(80)
         font_row.addWidget(self.font, 1)
         font_row.addWidget(self.size)
         form.addRow(font_row)
@@ -2453,7 +2463,7 @@ class MangaPage(QWidget):
         common_row.addWidget(self.vertical_button)
         common_row.addWidget(self.bold_button)
         common_row.addWidget(self.color_button)
-        self.align.setMinimumWidth(96)
+        self.align.setMinimumWidth(76)
         common_row.addWidget(self.align, 1)
         form.addRow(common_row)
         form.addRow(self.vertical_rtl)
@@ -2544,7 +2554,7 @@ class MangaPage(QWidget):
         right_holder_layout = QVBoxLayout(right_holder)
         right_holder_layout.setContentsMargins(0, 0, 0, 0)
         right_holder_layout.addWidget(scroll)
-        right_holder.setMinimumWidth(360)
+        right_holder.setMinimumWidth(280)
         right_holder.setMaximumWidth(560)
         split.addWidget(right_holder)
         # QFormLayout 会把字符串标签建成原生 QLabel，深色主题下前景是纯黑，
@@ -2565,7 +2575,7 @@ class MangaPage(QWidget):
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setStretchFactor(2, 0)
-        split.setSizes([180, 1, 380])
+        split.setSizes([160, 1, 320])
         # ==== 任务进度面板（画布右下角浮动，统一承载进度与模型/OCR通知）====
         self.progress_panel = MangaProgressOverlay(self.canvas.viewport())
         self.cancel_button = self.progress_panel.cancel_button
@@ -3118,8 +3128,15 @@ class MangaPage(QWidget):
             return
         width = card.width() or self.work_page.width() or self.width()
         show_detector = width <= 0 or width >= 1140
+        show_ocr = width <= 0 or width >= 920
+        show_summary = width <= 0 or width >= 780
         self.detector_label.setVisible(show_detector)
         self.detector.setVisible(show_detector)
+        if hasattr(self, "ocr_label"):
+            self.ocr_label.setVisible(show_ocr)
+            self.ocr.setVisible(show_ocr)
+        if hasattr(self, "project_summary_button"):
+            self.project_summary_button.setVisible(show_summary)
         if getattr(self, "pan_hint", None) and not self.pan_hint.isHidden():
             self.position_pan_hint()
 
