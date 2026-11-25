@@ -1172,7 +1172,7 @@ def test_progress_overlay_detect_ocr_notices_and_empty_page_numbers():
 
     editor.apply_theme()
     assert "mangaProgressOverlay" in editor.progress_panel.styleSheet()
-    assert "mangaZoomOverlay" in editor.zoom_overlay.styleSheet()
+    assert "mangaZoomOverlay" in editor.styleSheet()
     orphan_top_left = [
         child
         for child in editor.findChildren(type(editor.workspace_stack).__bases__[0])
