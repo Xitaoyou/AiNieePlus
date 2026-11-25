@@ -5846,6 +5846,14 @@ class MangaPage(QWidget):
         self.poll_timer.stop()
         if hasattr(self, "progress_panel") and not sip.isdeleted(self.progress_panel):
             self.progress_panel.cleanup()
+        if hasattr(self, "canvas") and not sip.isdeleted(self.canvas):
+            try:
+                self.canvas.scene().selectionChanged.disconnect(
+                    self.canvas.selection_changed
+                )
+            except (TypeError, RuntimeError):
+                pass
+            self.canvas.setScene(None)
         for sig, slot in (
             (qconfig.themeChanged, self.apply_theme),
             (qconfig.themeChanged, getattr(self.canvas, "apply_theme", None)),

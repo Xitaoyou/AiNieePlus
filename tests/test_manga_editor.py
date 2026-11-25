@@ -447,6 +447,7 @@ def test_late_background_results_are_disconnected_after_editor_cleanup():
         pool = editor.pool
         editor.background(lambda: (release.wait(2), 42)[1], called.append)
         editor.cleanup()
+        editor.close()
         editor.deleteLater()
         app.processEvents()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
