@@ -1,12 +1,14 @@
 """Unified bottom-right progress and notification overlay for the manga editor."""
 
+from PyQt5 import sip
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QVBoxLayout
 from qfluentwidgets import (
     FluentIcon,
     SimpleCardWidget,
-    StrongBodyLabel,
     TransparentToolButton,
+    isDarkTheme,
+    qconfig,
 )
 
 STATUS_TONES = {
@@ -36,10 +38,13 @@ class MangaProgressOverlay(SimpleCardWidget):
     dismissed = pyqtSignal()
     layoutChanged = pyqtSignal()
 
-    def __init__(self, parent=None, cancel_button=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("mangaProgressOverlay")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setBorderRadius(10)
         self._notices = []
+        self._tone = "idle"
         self._auto_hide_armed = False
         self._auto_hide_ms = 5000
 
@@ -57,24 +62,19 @@ class MangaProgressOverlay(SimpleCardWidget):
 
         self.tone_dot = QLabel(self)
         self.tone_dot.setFixedSize(8, 8)
-        self.set_tone("idle")
         header.addWidget(self.tone_dot, 0, Qt.AlignVCenter)
 
-        self.title_label = StrongBodyLabel("尚未开始任务", self)
+        self.title_label = QLabel("尚未开始任务", self)
         self.title_label.setWordWrap(False)
         header.addWidget(self.title_label, 1)
 
-        if cancel_button is not None:
-            cancel_button.setParent(self)
-            self.cancel_button = cancel_button
-        else:
-            self.cancel_button = TransparentToolButton(FluentIcon.CLOSE, self)
-            self.cancel_button.setToolTip("取消当前任务")
+        self.cancel_button = TransparentToolButton(FluentIcon.CLOSE, self)
+        self.cancel_button.setToolTip("取消当前任务")
         header.addWidget(self.cancel_button)
 
         self.details_button = TransparentToolButton(FluentIcon.INFO, self)
         self.details_button.setToolTip("查看任务明细")
-        self.details_button.clicked.connect(self.detailsRequested.emit)
+        self.details_button.clicked.connect(self.detailsRequested)
         self.details_button.hide()
         header.addWidget(self.details_button)
 
@@ -99,15 +99,71 @@ class MangaProgressOverlay(SimpleCardWidget):
 
         self.notices_label = QLabel(self)
         self.notices_label.setWordWrap(True)
-        self.notices_label.setStyleSheet("font-size: 12px;")
         self.notices_label.hide()
         layout.addWidget(self.notices_label)
 
+        self.set_tone("idle")
+        self.apply_theme()
+        qconfig.themeChanged.connect(self.apply_theme)
+        self.destroyed.connect(self._detach_theme)
         self.hide()
 
+    def _detach_theme(self, *_):
+        try:
+            qconfig.themeChanged.disconnect(self.apply_theme)
+        except (TypeError, RuntimeError):
+            pass
+
+    def cleanup(self):
+        self._auto_hide_timer.stop()
+        self._auto_hide_armed = False
+        self._detach_theme()
+
+    def apply_theme(self, *_):
+        if sip.isdeleted(self):
+            return
+        dark = isDarkTheme()
+        if dark:
+            bg = "rgba(32, 32, 32, 244)"
+            border = "rgba(255, 255, 255, 0.16)"
+            title_color = "#f3f3f3"
+            text_color = "#d4d4d4"
+            notice_color = "#ff9f9f" if self._tone == "error" else "#ffd369"
+            bar_bg = "rgba(255, 255, 255, 0.14)"
+            bar_chunk = "#4cc2ff"
+        else:
+            bg = "rgba(255, 255, 255, 248)"
+            border = "rgba(0, 0, 0, 0.12)"
+            title_color = "#1f1f1f"
+            text_color = "#555555"
+            notice_color = "#b42318" if self._tone == "error" else "#8a4f00"
+            bar_bg = "rgba(0, 0, 0, 0.08)"
+            bar_chunk = "#0f6cbd"
+
+        self.setStyleSheet(
+            f"SimpleCardWidget#mangaProgressOverlay {{"
+            f"background-color: {bg}; border: 1px solid {border}; border-radius: 10px;"
+            f"}}"
+        )
+        self.title_label.setStyleSheet(
+            f"color: {title_color}; font-weight: 600; background: transparent;"
+        )
+        self.progress_label.setStyleSheet(
+            f"color: {text_color}; background: transparent;"
+        )
+        self.notices_label.setStyleSheet(
+            f"color: {notice_color}; font-size: 12px; background: transparent;"
+        )
+        self.progress_bar.setStyleSheet(
+            f"QProgressBar {{ background: {bar_bg}; border: none; border-radius: 3px; }}"
+            f"QProgressBar::chunk {{ background: {bar_chunk}; border-radius: 3px; }}"
+        )
+
     def set_tone(self, tone):
+        self._tone = tone
         color = STATUS_TONES.get(tone, STATUS_TONES["idle"])
         self.tone_dot.setStyleSheet(f"background-color:{color};border-radius:4px;")
+        self.apply_theme()
 
     def _add_notice(self, text):
         text = str(text or "").strip()

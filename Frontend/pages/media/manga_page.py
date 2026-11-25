@@ -1751,16 +1751,30 @@ class MangaPage(QWidget):
         QTimer.singleShot(0, self.refresh_model_catalogue)
 
     def apply_theme(self, *_):
+        if sip.isdeleted(self):
+            return
         self.setAttribute(Qt.WA_StyledBackground, True)
-        background = "#202020" if isDarkTheme() else "#f7f9fc"
+        dark = isDarkTheme()
+        background = "#202020" if dark else "#f7f9fc"
+        overlay_bg = "rgba(32, 32, 32, 240)" if dark else "rgba(255, 255, 255, 244)"
+        overlay_border = (
+            "rgba(255, 255, 255, 0.14)" if dark else "rgba(0, 0, 0, 0.10)"
+        )
+        overlay_text = "#f3f3f3" if dark else "#1f1f1f"
         self.setStyleSheet(
             f"QWidget#manga_translation_page {{background:{background};}}"
+            f"SimpleCardWidget#mangaZoomOverlay, SimpleCardWidget#mangaPanHint {{"
+            f"background-color:{overlay_bg};border:1px solid {overlay_border};border-radius:10px;}}"
+            f"SimpleCardWidget#mangaZoomOverlay QLabel, SimpleCardWidget#mangaPanHint QLabel {{"
+            f"color:{overlay_text};background:transparent;}}"
         )
         palette = self.palette()
         palette.setColor(
-            QPalette.WindowText, QColor("#ffffff" if isDarkTheme() else "#202020")
+            QPalette.WindowText, QColor("#ffffff" if dark else "#202020")
         )
         self.setPalette(palette)
+        if hasattr(self, "progress_panel") and not sip.isdeleted(self.progress_panel):
+            self.progress_panel.apply_theme()
 
     def build_ui(self):
         outer = QVBoxLayout(self)
@@ -1923,40 +1937,40 @@ class MangaPage(QWidget):
         self.minimum.setValue(10)
         self.minimum.valueChanged.connect(lambda v: self.style_value("min_size", v))
         # 字号模式：自动适配 / 固定字号（互斥按钮）
-        self.autofit = TransparentPushButton("自动适配", self)
+        self.autofit = TransparentPushButton("自动适配", self.work_page)
         self.autofit.setCheckable(True)
         self.autofit.setToolTip("字号随框自动放大缩小")
         self.autofit.toggled.connect(
             lambda checked: checked and self.style_value("autofit", True)
         )
         self.autofit.toggled.connect(self.refresh_font_mode_hint)
-        self.fixed_size_button = TransparentPushButton("固定字号", self)
+        self.fixed_size_button = TransparentPushButton("固定字号", self.work_page)
         self.fixed_size_button.setCheckable(True)
         self.fixed_size_button.setToolTip("手动指定字号；字号输入框中修改")
         self.fixed_size_button.toggled.connect(
             lambda checked: checked and self.style_value("autofit", False)
         )
         self.fixed_size_button.toggled.connect(self.refresh_font_mode_hint)
-        self.horizontal_button = TransparentPushButton("横", self)
+        self.horizontal_button = TransparentPushButton("横", self.work_page)
         self.horizontal_button.setCheckable(True)
         self.horizontal_button.setToolTip("横排文字")
         self.horizontal_button.clicked.connect(
             lambda: self.style_value("vertical", False)
         )
-        self.vertical_button = TransparentPushButton("竖", self)
+        self.vertical_button = TransparentPushButton("竖", self.work_page)
         self.vertical_button.setCheckable(True)
         self.vertical_button.setToolTip("竖排文字")
         self.vertical_button.clicked.connect(lambda: self.style_value("vertical", True))
-        self.bold_button = TransparentPushButton("B", self)
+        self.bold_button = TransparentPushButton("B", self.work_page)
         self.bold_button.setCheckable(True)
         self.bold_button.setToolTip("粗体")
         self.bold_button.clicked.connect(
             lambda checked: self.style_value("bold", checked)
         )
-        self.color_button = TransparentToolButton(FluentIcon.PALETTE, self)
+        self.color_button = TransparentToolButton(FluentIcon.PALETTE, self.work_page)
         self.color_button.setToolTip("文字颜色")
         self.color_button.clicked.connect(lambda: self.pick_color("color"))
-        self.vertical_rtl = QCheckBox("竖排从右往左", self)
+        self.vertical_rtl = QCheckBox("竖排从右往左", self.work_page)
         self.vertical_rtl.setChecked(True)
         self.vertical_rtl.setToolTip(
             "竖排阅读方向：日式漫画默认从右往左；取消勾选则从左往右"
@@ -2028,7 +2042,7 @@ class MangaPage(QWidget):
         heading.addWidget(SubtitleLabel("漫画翻译", self.work_page))
         heading.addSpacing(16)
         self.project_summary_button = TransparentPushButton(
-            FluentIcon.SETTING, "项目设置", self
+            FluentIcon.SETTING, "项目设置", self.work_page
         )
         self.project_summary_button.setToolTip("检测模型、语言、阈值与翻译接口")
         self.project_summary_button.clicked.connect(self.open_project_settings)
@@ -2140,7 +2154,7 @@ class MangaPage(QWidget):
         self.undo_button.setEnabled(False)
         self.redo_button.setEnabled(False)
         commands.addStretch(1)
-        one_click = PrimarySplitPushButton("一键翻译", self)
+        one_click = PrimarySplitPushButton("一键翻译", command_card)
         one_menu = RoundMenu(parent=one_click)
         for title, action in [
             ("检测整部文字框", lambda: self.ask_detection(1)),
@@ -2168,9 +2182,6 @@ class MangaPage(QWidget):
                 triggered=lambda: PunctuationRulesDialog(self).exec(),
             )
         )
-        self.cancel_button = TransparentToolButton(FluentIcon.CLOSE, self)
-        self.cancel_button.setToolTip("取消当前任务")
-        self.cancel_button.clicked.connect(self.cancel_job)
         for sequence, callback in [
             ("Ctrl+S", self.save),
             ("Ctrl+Z", self.undo.undo),
@@ -2275,13 +2286,13 @@ class MangaPage(QWidget):
             QSizePolicy.Preferred, QSizePolicy.Preferred
         )
         tools.addWidget(self.geometry_hint, 1)
-        self.geometry_done = TransparentToolButton(FluentIcon.ACCEPT_MEDIUM, self)
+        self.geometry_done = TransparentToolButton(FluentIcon.ACCEPT_MEDIUM, center)
         self.geometry_done.setToolTip("完成并返回译文排版 (Esc)")
         self.geometry_done.hide()
         self.geometry_done.clicked.connect(self.exit_geometry_mode)
         tools.addWidget(self.geometry_done)
         self.precise_divider = self.divider(tools)
-        self.tool_recognize = TransparentToolButton(FluentIcon.SEARCH, self)
+        self.tool_recognize = TransparentToolButton(FluentIcon.SEARCH, center)
         self.tool_recognize.setAccessibleName("识别")
         self.tool_recognize.setToolTip(
             "识别：无框时检测建框；有框时 OCR 当前页或选中的框。OCR 会更新未锁定的原文。"
@@ -2320,6 +2331,8 @@ class MangaPage(QWidget):
         self.canvas.cycleRegionRequested.connect(self.cycle_region)
         # 画布右下角统一：视图切换 + 适应窗口 + 缩放
         self.zoom_overlay = SimpleCardWidget(self.canvas.viewport())
+        self.zoom_overlay.setObjectName("mangaZoomOverlay")
+        self.zoom_overlay.setAttribute(Qt.WA_StyledBackground, True)
         zoom_row = QHBoxLayout(self.zoom_overlay)
         zoom_row.setContentsMargins(8, 4, 8, 4)
         zoom_row.setSpacing(4)
@@ -2336,6 +2349,8 @@ class MangaPage(QWidget):
         zoom_row.addWidget(self.zoom_label)
         self.zoom_overlay.adjustSize()
         self.pan_hint = SimpleCardWidget(self.canvas.viewport())
+        self.pan_hint.setObjectName("mangaPanHint")
+        self.pan_hint.setAttribute(Qt.WA_StyledBackground, True)
         pan_row = QHBoxLayout(self.pan_hint)
         pan_row.setContentsMargins(10, 6, 10, 6)
         self.pan_hint_label = QLabel("按住空格键或鼠标中键拖动画面")
@@ -2523,9 +2538,9 @@ class MangaPage(QWidget):
         split.setStretchFactor(2, 0)
         split.setSizes([180, 1, 380])
         # ==== 任务进度面板（画布右下角浮动，统一承载进度与模型/OCR通知）====
-        self.progress_panel = MangaProgressOverlay(
-            self.canvas.viewport(), cancel_button=self.cancel_button
-        )
+        self.progress_panel = MangaProgressOverlay(self.canvas.viewport())
+        self.cancel_button = self.progress_panel.cancel_button
+        self.cancel_button.clicked.connect(self.cancel_job)
         self.progress_label = self.progress_panel.progress_label
         self.progress_bar = self.progress_panel.progress_bar
         self.progress_panel.detailsRequested.connect(self.show_task_details)
@@ -3425,14 +3440,17 @@ class MangaPage(QWidget):
     def show_task_details(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("漫画翻译 · 进度与失败明细")
-        dialog.resize(780, 520)
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel(self.progress_label.text()))
-        table = QTableWidget()
-        table.setColumnCount(4)
-        table.setHorizontalHeaderLabels(["页面", "文字框", "状态", "明细 / 原因"])
+        apply_dialog_theme(dialog, "mangaTaskDetailsDialog")
+        dialog.resize(820, 540)
+        layout = dialog_layout(dialog, spacing=10)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(SubtitleLabel("进度与失败明细", dialog))
+        header.addStretch(1)
+        layout.addLayout(header)
+
         rows = []
-        seen_regions = set()
         pages_list = (self.document or {}).get("pages", [])
         pages = {p["id"]: p for p in pages_list}
         states = {
@@ -3442,12 +3460,16 @@ class MangaPage(QWidget):
             "cancelled": "已取消",
             "idle": "未开始",
         }
+        has_failed_translation = False
         for p in pages_list:
             for r in p["regions"]:
                 t_state = r.get("translation_state", "idle")
-                warnings = [str(w).strip() for w in (r.get("warnings") or []) if str(w).strip()]
+                warnings = [
+                    str(w).strip() for w in (r.get("warnings") or []) if str(w).strip()
+                ]
+                if t_state in {"failed", "cancelled"}:
+                    has_failed_translation = True
                 if t_state != "idle" or warnings:
-                    seen_regions.add(r["id"])
                     detail = r.get("translation_error", "")
                     if warnings:
                         warn_text = "；".join(warnings)
@@ -3455,7 +3477,16 @@ class MangaPage(QWidget):
                     status_text = states.get(t_state, "未开始")
                     if t_state == "idle" and warnings:
                         status_text = "需检查"
-                    rows.append((p, r, status_text, detail))
+                    tone = (
+                        "error"
+                        if t_state in {"failed", "cancelled"}
+                        else "warn"
+                        if warnings
+                        else "ok"
+                        if t_state == "succeeded"
+                        else ""
+                    )
+                    rows.append((p, r, status_text, detail, tone))
         last_report = getattr(self, "last_task_report", {}) or {}
         for error in last_report.get("errors", []):
             page = pages.get(error.get("page_id"), {"id": "", "name": "任务"})
@@ -3465,6 +3496,7 @@ class MangaPage(QWidget):
                     {"id": None, "order": -1},
                     "失败",
                     error.get("message", str(error)),
+                    "error",
                 )
             )
         for page_id in last_report.get("empty_pages", []) or []:
@@ -3475,6 +3507,7 @@ class MangaPage(QWidget):
                     {"id": None, "order": -1},
                     "未检出",
                     "未检出文字框：可降低检测阈值或更换检测模型",
+                    "warn",
                 )
             )
         for item in last_report.get("fallback_pages", []) or []:
@@ -3485,6 +3518,7 @@ class MangaPage(QWidget):
                     {"id": None, "order": -1},
                     "已补检",
                     f"由 {item.get('model', '')} 回退到行级检测补出文字框",
+                    "warn",
                 )
             )
         for item in last_report.get("skipped_pages", []) or []:
@@ -3495,25 +3529,59 @@ class MangaPage(QWidget):
                     {"id": None, "order": -1},
                     "已跳过",
                     item.get("message", "已有文字框，已跳过检测"),
+                    "",
                 )
             )
+
+        summary_note = dialog_note(
+            f"{self.progress_label.text()}（共 {len(rows)} 条记录）"
+        )
+        layout.addWidget(summary_note)
+
+        table = QTableWidget(dialog)
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(["页面", "文字框", "状态", "明细 / 原因"])
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.horizontalHeader().setStretchLastSection(True)
         table.setRowCount(len(rows))
-        for i, (p, r, status_text, detail_text) in enumerate(rows):
+        dark = isDarkTheme()
+        tone_colors = {
+            "error": QColor("#ff7b7b" if dark else "#c42b1c"),
+            "warn": QColor("#ffd369" if dark else "#9d5d00"),
+            "ok": QColor("#6ccb5f" if dark else "#0f7b0f"),
+        }
+        for i, (p, r, status_text, detail_text, tone) in enumerate(rows):
             box_label = str(r["order"] + 1) if r.get("order", -1) >= 0 else "-"
             for j, value in enumerate(
                 [p["name"], box_label, status_text, detail_text]
             ):
-                table.setItem(i, j, QTableWidgetItem(value))
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.horizontalHeader().setStretchLastSection(True)
+                item = QTableWidgetItem(value)
+                if j == 2 and tone in tone_colors:
+                    item.setForeground(tone_colors[tone])
+                table.setItem(i, j, item)
         table.resizeColumnsToContents()
         table.cellDoubleClicked.connect(
-            lambda row, col: self.locate_region(rows[row][0]["id"], rows[row][1]["id"])
+            lambda row, col: (
+                self.locate_region(rows[row][0]["id"], rows[row][1]["id"]),
+                dialog.accept(),
+            )
         )
-        layout.addWidget(table)
-        self.button(
-            layout, "重试失败文字框", lambda: (dialog.accept(), self.retry_failed())
-        )
+        layout.addWidget(table, 1)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        footer.addWidget(dialog_note("双击任意行可快速定位到对应页面或文字框"), 1)
+        retry_btn = PrimaryPushButton("重试失败文字框", dialog)
+        retry_btn.setEnabled(has_failed_translation)
+        retry_btn.clicked.connect(lambda: (dialog.accept(), self.retry_failed()))
+        close_btn = QPushButton("关闭", dialog)
+        close_btn.clicked.connect(dialog.accept)
+        footer.addWidget(retry_btn)
+        footer.addWidget(close_btn)
+        layout.addLayout(footer)
         dialog.exec()
 
     def locate_region(self, page_id, region_id):
@@ -5759,3 +5827,12 @@ class MangaPage(QWidget):
         self.task_callbacks.clear()
         self.save_timer.stop()
         self.poll_timer.stop()
+        if hasattr(self, "progress_panel") and not sip.isdeleted(self.progress_panel):
+            self.progress_panel.cleanup()
+        for slot in (self.apply_theme, getattr(self.canvas, "apply_theme", None)):
+            if slot is None:
+                continue
+            try:
+                qconfig.themeChanged.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
