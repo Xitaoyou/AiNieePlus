@@ -1794,6 +1794,7 @@ class MangaPage(QWidget):
             f"QScrollArea#mangaRightScroll QScrollBar::handle:horizontal:hover {{background:{sb_hover};}}"
             f"QScrollArea#mangaRightScroll QScrollBar::add-line:horizontal, QScrollArea#mangaRightScroll QScrollBar::sub-line:horizontal {{width:0px;border:none;background:none;}}"
             f"QScrollArea#mangaRightScroll QScrollBar::add-page:horizontal, QScrollArea#mangaRightScroll QScrollBar::sub-page:horizontal {{background:none;}}"
+            f"QSplitter#mangaSplitter::handle {{background:transparent;border:none;}}"
         )
         palette = self.palette()
         palette.setColor(
@@ -2222,6 +2223,7 @@ class MangaPage(QWidget):
 
         # ---- 三栏布局 ----
         split = QSplitter(Qt.Horizontal)
+        split.setObjectName("mangaSplitter")
         split.setChildrenCollapsible(False)
         split.setHandleWidth(6)
         root.addWidget(split, 1)
@@ -3131,7 +3133,7 @@ class MangaPage(QWidget):
         width = card.width() if card.isVisible() and card.width() > 200 else self.width()
         show_detector = width <= 0 or width >= 1140
         show_ocr = width <= 0 or width >= 900
-        show_summary = width <= 0 or width >= 760
+        show_summary = width <= 0 or width >= 880
         self.detector_label.setVisible(show_detector)
         self.detector.setVisible(show_detector)
         if hasattr(self, "ocr_label"):

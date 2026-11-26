@@ -591,12 +591,13 @@ def test_editor_header_models_update_project_and_canvas_button_dispatches_ocr():
     assert not editor.ocr.isHidden()
     editor.resize(860, 760)
     QApplication.instance().processEvents()
-    assert editor.detector.isHidden() and editor.ocr.isHidden()
+    assert editor.detector.isHidden() and editor.ocr.isHidden() and editor.project_summary_button.isHidden()
     assert editor.width() <= 860
     assert "mangaRightScroll" in editor.styleSheet()
+    assert "mangaSplitter" in editor.styleSheet()
     editor.resize(1440, 900)
     QApplication.instance().processEvents()
-    assert not editor.detector.isHidden() and not editor.ocr.isHidden()
+    assert not editor.detector.isHidden() and not editor.ocr.isHidden() and not editor.project_summary_button.isHidden()
 
     editor.refresh_model_catalogue([
         {"id": "manga-panel", "name": "Panel", "role": "detect", "installed": True,
