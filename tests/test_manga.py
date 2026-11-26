@@ -711,10 +711,10 @@ def test_legacy_detector_merges_overlapping_columns_and_recovers_sparse_pages(
     def compute_overlapping(context, **kw):
         if kw["model_id"] == "legacy-balloon-yolov4":
             return [
-                {"class_id": 1, "score": 0.85, "rect": [180, 40, 45, 95]},
-                {"class_id": 1, "score": 0.80, "rect": [150, 50, 42, 82]},
-                {"class_id": 1, "score": 0.88, "rect": [130, 190, 48, 120]},
-                {"class_id": 1, "score": 0.84, "rect": [92, 175, 48, 135]},
+                {"class_id": 1, "score": 0.85, "rect": [170, 20, 30, 55]},
+                {"class_id": 1, "score": 0.80, "rect": [150, 24, 28, 50]},
+                {"class_id": 1, "score": 0.88, "rect": [60, 88, 30, 60]},
+                {"class_id": 1, "score": 0.84, "rect": [40, 84, 28, 64]},
             ]
         return []
 
@@ -727,9 +727,9 @@ def test_legacy_detector_merges_overlapping_columns_and_recovers_sparse_pages(
     # 2) Sparse legacy detection (1 tiny edge box) -> falls back to recover missed bubble
     def compute_sparse(context, **kw):
         if kw["model_id"] == "legacy-balloon-yolov4":
-            return [{"class_id": 1, "score": 0.70, "rect": [20, 260, 24, 30]}]
+            return [{"class_id": 1, "score": 0.70, "rect": [10, 110, 16, 20]}]
         return [
-            {"class_id": 1, "score": 0.90, "rect": [360, 40, 120, 220]},
+            {"class_id": 1, "score": 0.90, "rect": [140, 20, 60, 100]},
         ]
 
     monkeypatch.setattr(service, "compute", compute_sparse)
