@@ -249,6 +249,7 @@ class LLMClientFactory:
             return OpenAI(
                 base_url=config.get("api_url"),
                 api_key=api_key,
+                max_retries=0,
                 default_headers=headers or None,
                 http_client=create_curl_client(timeout=timeout, preserved_headers=headers)
             )
@@ -256,6 +257,7 @@ class LLMClientFactory:
             return OpenAI(
                 base_url=config.get("api_url"),
                 api_key=api_key,
+                max_retries=0,
                 default_headers=headers or None,
                 http_client=create_httpx_client()
             )
@@ -264,6 +266,7 @@ class LLMClientFactory:
         return anthropic.Anthropic(
             base_url=config.get("api_url"),
             api_key=config.get("api_key"),
+            max_retries=0,
             default_headers=self._build_sdk_headers(config) or None,
             http_client=create_httpx_client()
         )
@@ -273,6 +276,7 @@ class LLMClientFactory:
             aws_region=config.get("region"),
             aws_access_key=config.get("access_key"),
             aws_secret_key=config.get("secret_key"),
+            max_retries=0,
             http_client=create_httpx_client()
         )
 

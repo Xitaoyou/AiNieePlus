@@ -6028,8 +6028,17 @@ class MangaPage(QWidget):
 
     def prepare_to_close(self):
         if self.job_id or self.submitting:
-            self.status.setText("请先取消漫画任务，待当前推理结束后再关闭")
-            return False
+            if (
+                self.ask_yes_no(
+                    "漫画任务仍在执行",
+                    "当前仍有漫画任务正在执行或停止中，确定立即取消并退出程序？",
+                    yes="停止并退出",
+                    no="继续等待",
+                )
+                != QMessageBox.Yes
+            ):
+                return False
+            self.detach_job(cancel=True)
         return self.prepare_to_leave()
 
     def cleanup(self):

@@ -61,9 +61,9 @@ class MangaService:
     # 行级文字框来源，按可靠性排序
     TEXT_LINE_FALLBACKS = ("japanese-lines", "ppocr-manga-det", "comic-speech-bubble")
 
-    @staticmethod
-    def drop_nested_text_boxes(boxes):
-        """Keep the full text block when a detector also reports its individual lines."""
+    @classmethod
+    def drop_nested_text_boxes(cls, boxes):
+        """Keep the full text block when a detector also reports nested or duplicate lines."""
         text = []
         for index, box in enumerate(boxes):
             if box["class_id"] != 1:
@@ -78,7 +78,12 @@ class MangaService:
         dropped = set()
         for index, x, y, w, h, area, _ in text:
             cx, cy = x + w / 2, y + h / 2
+            rect = (x, y, w, h)
             for left, top, right, bottom in kept:
+                kept_rect = (left, top, right - left, bottom - top)
+                if cls.boxes_overlap(kept_rect, rect):
+                    dropped.add(index)
+                    break
                 if not (left <= cx <= right and top <= cy <= bottom):
                     continue
                 covered = max(0, min(x + w, right) - max(x, left)) * max(
@@ -455,27 +460,54 @@ class MangaService:
                             confidence=document.settings.confidence,
                         )
                         detector = document.settings.detector
-                        if detector not in self.PANEL_ONLY_MODELS:
-                            results = self.drop_nested_text_boxes(results)
+                        results = self.drop_nested_text_boxes(results)
                         own_text = [d for d in results if d["class_id"] == 1]
                         own_panels = [d for d in results if d["class_id"] == 0]
                         supplemented = False
                         if detector in self.PANEL_ONLY_MODELS:
                             # 面板模型自己也能报出几个有把握的气泡，别丢；
-                            # 只把行级聚合出的、它没覆盖到的气泡补进来。
+                            # 只把行级聚合出的、它没覆盖到的气泡补进来；
+                            # 若行级聚合出了完整覆盖某窄框的更大整气泡，用完整气泡替换窄框，避免排版字号过小。
                             bubbles = self.detect_text_bubbles(
                                 context, source, document.settings.confidence
                             )
-                            extra = [
-                                bubble
-                                for bubble in bubbles
-                                if not any(
-                                    self.boxes_overlap(bubble["rect"], own["rect"])
-                                    for own in own_text
-                                )
-                            ]
-                            if extra:
-                                results = own_panels + own_text + extra
+                            replaced_own = set()
+                            extra = []
+                            for bubble in bubbles:
+                                bx, by, bw, bh = bubble["rect"]
+                                b_area = bw * bh
+                                overlapped = [
+                                    (idx, own)
+                                    for idx, own in enumerate(own_text)
+                                    if self.boxes_overlap(bubble["rect"], own["rect"])
+                                ]
+                                if not overlapped:
+                                    extra.append(bubble)
+                                    continue
+                                if all(
+                                    b_area > 1.35 * (own["rect"][2] * own["rect"][3])
+                                    and max(
+                                        0,
+                                        min(bx + bw, own["rect"][0] + own["rect"][2])
+                                        - max(bx, own["rect"][0]),
+                                    )
+                                    * max(
+                                        0,
+                                        min(by + bh, own["rect"][1] + own["rect"][3])
+                                        - max(by, own["rect"][1]),
+                                    )
+                                    >= 0.70 * (own["rect"][2] * own["rect"][3])
+                                    for _, own in overlapped
+                                ):
+                                    replaced_own.update(idx for idx, _ in overlapped)
+                                    extra.append(bubble)
+                            if extra or replaced_own:
+                                kept_own = [
+                                    own
+                                    for idx, own in enumerate(own_text)
+                                    if idx not in replaced_own
+                                ]
+                                results = own_panels + kept_own + extra
                                 supplemented = True
                         elif detector in self.LINE_LEVEL_MODELS:
                             # 用户直接选了行级模型：它报的是逐列小框，必须聚合，
@@ -520,13 +552,14 @@ class MangaService:
                                 if extra:
                                     results = own_panels + own_text + extra
                                     supplemented = True
-                        if detector not in self.PANEL_ONLY_MODELS and (
+                        if (
                             supplemented
+                            or detector in self.PANEL_ONLY_MODELS
                             or detector in self.LINE_LEVEL_MODELS
                             or detector == LEGACY_BALLOON_ID
                         ):
                             # Merging lines or adding fallback boxes can create
-                            # new containment after the initial detector pass.
+                            # new containment or overlaps after the initial detector pass.
                             results = self.drop_nested_text_boxes(results)
                         if supplemented:
                             report.setdefault("fallback_pages", []).append(

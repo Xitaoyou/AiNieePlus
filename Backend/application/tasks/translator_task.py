@@ -169,6 +169,9 @@ class TranslatorTask(LogMixin, Base):
             platform_config
         )
 
+        if self.context is not None and self.context.is_cancelled():
+            return {"check_result": False, "row_count": 0, "cancelled": True, "error": "操作已取消"}
+
         # 如果请求结果标记为 skip，即有运行错误发生，则直接返回错误信息，停止后续任务
         if skip == True:
             return {

@@ -300,8 +300,9 @@ def translate_model(model, config=None, context=None) -> dict:
                     pending[executor.submit(task.start)] = (items, file_path)
                 while pending:
                     if context.is_cancelled():
-                        for future in pending:
+                        for future in list(pending):
                             future.cancel()
+                        break
                     completed, _ = wait(tuple(pending), timeout=0.1, return_when=FIRST_COMPLETED)
                     for future in completed:
                         items, file_path = pending.pop(future)
@@ -315,9 +316,11 @@ def translate_model(model, config=None, context=None) -> dict:
                 for future in pending:
                     future.cancel()
             finally:
-                executor.shutdown(wait=True, cancel_futures=context.is_cancelled())
+                cancelled = context.is_cancelled()
+                executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
                 for future, (items, file_path) in pending.items():
-                    consume_result(future, items, file_path, notify=False)
+                    if not cancelled or (future.done() and not future.cancelled()):
+                        consume_result(future, items, file_path, notify=False)
     except Exception as error:
         abort_operation(error)
 

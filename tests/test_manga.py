@@ -738,3 +738,127 @@ def test_legacy_detector_merges_overlapping_columns_and_recovers_sparse_pages(
     )
     assert len(result2["workspace"]["pages"][0]["regions"]) == 2
     assert len(result2["report"]["fallback_pages"]) == 1
+
+
+def test_manga_panel_drops_overlapping_boxes_and_upgrades_narrow_partial_box(
+    workspace, monkeypatch
+):
+    store, doc = workspace
+    doc.pages[0].regions = []
+    doc.settings.detector = "manga-panel"
+    doc = store.save(doc, doc.revision)
+    service = StubService(store, StubModels())
+
+    # 1) manga-panel itself outputs two overlapping boxes for one bubble -> keep only the larger one
+    def compute_self_overlap(context, **kw):
+        if kw["model_id"] == "manga-panel":
+            return [
+                {"class_id": 1, "score": 0.85, "rect": [40, 20, 70, 120]},
+                {"class_id": 1, "score": 0.90, "rect": [42, 24, 34, 114]},
+            ]
+        return []
+
+    monkeypatch.setattr(service, "compute", compute_self_overlap)
+    res1 = service.run(
+        doc.id, "detect", page_ids=[doc.pages[0].id], options={"replace_regions": True}
+    )
+    regions1 = res1["workspace"]["pages"][0]["regions"]
+    assert len(regions1) == 1
+    assert regions1[0]["ocr_rect"]["width"] == 70
+
+    # 2) manga-panel outputs only a narrow 1-column box, fallback detects full enclosing bubble -> upgrade
+    def compute_narrow_then_full(context, **kw):
+        if kw["model_id"] == "manga-panel":
+            return [{"class_id": 1, "score": 0.88, "rect": [42, 24, 32, 114]}]
+        return [
+            {"class_id": 1, "score": 0.82, "rect": [40, 20, 42, 120]},
+            {"class_id": 1, "score": 0.81, "rect": [74, 20, 40, 120]},
+        ]
+
+    monkeypatch.setattr(service, "compute", compute_narrow_then_full)
+    res2 = service.run(
+        doc.id, "detect", page_ids=[doc.pages[0].id], options={"replace_regions": True}
+    )
+    regions2 = res2["workspace"]["pages"][0]["regions"]
+    assert len(regions2) == 1
+    assert regions2[0]["ocr_rect"]["width"] >= 70
+
+
+def test_translate_model_returns_immediately_on_cancel_with_blocked_request(
+    monkeypatch, tmp_path
+):
+    import threading
+    import time
+    from Backend.application.translation_service import translate_model
+    from Backend.application.tasks.translator_task import TranslatorTask
+    from Backend.domain.config.task_config import TaskConfig
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_start(self):
+        started.set()
+        release.wait(timeout=15)
+        return {"check_result": False, "row_count": 0, "error": "timeout"}
+
+    monkeypatch.setattr(TranslatorTask, "prepare", lambda self, *a, **kw: None)
+    monkeypatch.setattr(TranslatorTask, "start", blocked_start)
+    ctx = ExecutionContext()
+    model = {
+        "schema_version": 2,
+        "project_id": "p1",
+        "project_type": "I18next",
+        "project_name": "test",
+        "files": {
+            "a.json": {
+                "file_id": "f1",
+                "media_type": "document",
+                "storage_path": "a.json",
+                "file_project_type": "I18next",
+                "items": [
+                    {
+                        "item_id": "i1",
+                        "text_index": 0,
+                        "source_text": "こんにちは",
+                        "locator": {"kind": "document", "index": 0},
+                    }
+                ],
+            }
+        },
+    }
+    resolved = TaskConfig()
+    resolved.target_platform = "openai"
+    resolved.model = "gpt-4o-mini"
+    resolved.api_key = "test"
+    resolved.api_url = "https://api.mistral.ai/v1"
+    resolved.rpm_limit = 60
+    resolved.round_limit = 1
+    resolved.actual_thread_counts = 1
+    resolved._auto_concurrency = None
+    resolved.tokens_limit_switch = False
+    resolved.lines_limit_switch = True
+    resolved.lines_limit = 10
+    resolved.tokens_limit = 512
+    resolved.pre_line_counts = 0
+    resolved.source_language = "日语"
+    resolved.target_language = "简中"
+    monkeypatch.setattr(
+        "Backend.application.translation_service.resolve_translation_config",
+        lambda *_: resolved,
+    )
+
+    def cancel_soon():
+        started.wait(timeout=5)
+        ctx.cancel()
+
+    t = threading.Thread(target=cancel_soon, daemon=True)
+    t.start()
+    t0 = time.monotonic()
+    try:
+        out = translate_model(model, config=resolved, context=ctx)
+    finally:
+        release.set()
+        t.join(timeout=2)
+    elapsed = time.monotonic() - t0
+    assert out["status"] == "cancelled"
+    assert elapsed < 3.0
