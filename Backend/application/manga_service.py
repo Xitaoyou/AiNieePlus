@@ -473,49 +473,21 @@ class MangaService:
                         own_panels = [d for d in results if d["class_id"] == 0]
                         supplemented = False
                         if detector in self.PANEL_ONLY_MODELS:
-                            # 面板模型自己也能报出几个有把握的气泡，别丢；
-                            # 只把行级聚合出的、它没覆盖到的气泡补进来；
-                            # 若行级聚合出了完整覆盖某窄框的更大整气泡，用完整气泡替换窄框，避免排版字号过小。
+                            # 面板模型自己报出的是紧凑包裹文字的框，保留不放大；
+                            # 只把行级聚合出的、它完全没覆盖到的气泡补进来。
                             bubbles = self.detect_text_bubbles(
                                 context, source, document.settings.confidence
                             )
-                            replaced_own = set()
-                            extra = []
-                            for bubble in bubbles:
-                                bx, by, bw, bh = bubble["rect"]
-                                b_area = bw * bh
-                                overlapped = [
-                                    (idx, own)
-                                    for idx, own in enumerate(own_text)
-                                    if self.boxes_overlap(bubble["rect"], own["rect"])
-                                ]
-                                if not overlapped:
-                                    extra.append(bubble)
-                                    continue
-                                if (
-                                    len(overlapped) == 1
-                                    and b_area > 1.35 * (overlapped[0][1]["rect"][2] * overlapped[0][1]["rect"][3])
-                                    and max(
-                                        0,
-                                        min(bx + bw, overlapped[0][1]["rect"][0] + overlapped[0][1]["rect"][2])
-                                        - max(bx, overlapped[0][1]["rect"][0]),
-                                    )
-                                    * max(
-                                        0,
-                                        min(by + bh, overlapped[0][1]["rect"][1] + overlapped[0][1]["rect"][3])
-                                        - max(by, overlapped[0][1]["rect"][1]),
-                                    )
-                                    >= 0.70 * (overlapped[0][1]["rect"][2] * overlapped[0][1]["rect"][3])
-                                ):
-                                    replaced_own.add(overlapped[0][0])
-                                    extra.append(bubble)
-                            if extra or replaced_own:
-                                kept_own = [
-                                    own
-                                    for idx, own in enumerate(own_text)
-                                    if idx not in replaced_own
-                                ]
-                                results = own_panels + kept_own + extra
+                            extra = [
+                                bubble
+                                for bubble in bubbles
+                                if not any(
+                                    self.boxes_overlap(bubble["rect"], own["rect"])
+                                    for own in own_text
+                                )
+                            ]
+                            if extra:
+                                results = own_panels + own_text + extra
                                 supplemented = True
                         elif detector in self.LINE_LEVEL_MODELS:
                             # 用户直接选了行级模型：它报的是逐列小框，必须聚合，

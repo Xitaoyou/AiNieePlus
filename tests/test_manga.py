@@ -766,22 +766,21 @@ def test_manga_panel_drops_overlapping_boxes_and_upgrades_narrow_partial_box(
     assert len(regions1) == 1
     assert regions1[0]["ocr_rect"]["width"] == 70
 
-    # 2) manga-panel outputs only a narrow 1-column box, fallback detects full enclosing bubble -> upgrade
-    def compute_narrow_then_full(context, **kw):
+    # 2) manga-panel keeps its tight text-wrapping box instead of replacing with a huge outer bubble
+    def compute_tight_text_box(context, **kw):
         if kw["model_id"] == "manga-panel":
-            return [{"class_id": 1, "score": 0.88, "rect": [42, 24, 32, 114]}]
+            return [{"class_id": 1, "score": 0.88, "rect": [50, 30, 44, 110]}]
         return [
-            {"class_id": 1, "score": 0.82, "rect": [40, 20, 42, 120]},
-            {"class_id": 1, "score": 0.81, "rect": [74, 20, 40, 120]},
+            {"class_id": 1, "score": 0.82, "rect": [30, 10, 90, 145]},
         ]
 
-    monkeypatch.setattr(service, "compute", compute_narrow_then_full)
+    monkeypatch.setattr(service, "compute", compute_tight_text_box)
     res2 = service.run(
         doc.id, "detect", page_ids=[doc.pages[0].id], options={"replace_regions": True}
     )
     regions2 = res2["workspace"]["pages"][0]["regions"]
     assert len(regions2) == 1
-    assert regions2[0]["ocr_rect"]["width"] >= 70
+    assert regions2[0]["ocr_rect"]["width"] == 44
 
 
 def test_translate_model_returns_immediately_on_cancel_with_blocked_request(
