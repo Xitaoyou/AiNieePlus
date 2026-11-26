@@ -3126,10 +3126,10 @@ class MangaPage(QWidget):
         card = getattr(self, "command_card", None)
         if card is None or not hasattr(self, "detector_label"):
             return
-        width = card.width() or self.work_page.width() or self.width()
+        width = card.width() if card.isVisible() and card.width() > 200 else self.width()
         show_detector = width <= 0 or width >= 1140
-        show_ocr = width <= 0 or width >= 880
-        show_summary = width <= 0 or width >= 740
+        show_ocr = width <= 0 or width >= 900
+        show_summary = width <= 0 or width >= 760
         self.detector_label.setVisible(show_detector)
         self.detector.setVisible(show_detector)
         if hasattr(self, "ocr_label"):
