@@ -862,3 +862,46 @@ def test_translate_model_returns_immediately_on_cancel_with_blocked_request(
     elapsed = time.monotonic() - t0
     assert out["status"] == "cancelled"
     assert elapsed < 3.0
+
+
+def test_merge_into_bubbles_separates_stacked_vertical_and_merges_gapped_columns():
+    # 1) Two vertically stacked vertical bubbles (touching vertically) must stay separate
+    stacked = [
+        {"class_id": 1, "score": 0.95, "rect": [155, 363, 130, 223]},
+        {"class_id": 1, "score": 0.94, "rect": [136, 583, 81, 158]},
+    ]
+    merged_stacked = MangaService.merge_into_bubbles(stacked)
+    assert len(merged_stacked) == 2
+
+    # 2) Two adjacent vertical columns in the same bubble with ~11px gap (gap <= 0.60 * min_w) must merge
+    columns = [
+        {"class_id": 1, "score": 0.90, "rect": [100, 40, 35, 130]},
+        {"class_id": 1, "score": 0.85, "rect": [146, 55, 22, 50]},
+    ]
+    merged_cols = MangaService.merge_into_bubbles(columns)
+    assert len(merged_cols) == 1
+
+
+def test_manga_panel_never_merges_two_separate_bubbles_via_fallback(
+    workspace, monkeypatch
+):
+    store, doc = workspace
+    doc.pages[0].regions = []
+    doc.settings.detector = "manga-panel"
+    doc = store.save(doc, doc.revision)
+    service = StubService(store, StubModels())
+
+    def compute_two_separate(context, **kw):
+        if kw["model_id"] == "manga-panel":
+            return [
+                {"class_id": 1, "score": 0.97, "rect": [80, 10, 50, 60]},
+                {"class_id": 1, "score": 0.91, "rect": [82, 74, 44, 60]},
+            ]
+        # Fallback reports one huge box covering both separate bubbles
+        return [{"class_id": 1, "score": 0.95, "rect": [75, 8, 60, 130]}]
+
+    monkeypatch.setattr(service, "compute", compute_two_separate)
+    res = service.run(
+        doc.id, "detect", page_ids=[doc.pages[0].id], options={"replace_regions": True}
+    )
+    assert len(res["workspace"]["pages"][0]["regions"]) == 2

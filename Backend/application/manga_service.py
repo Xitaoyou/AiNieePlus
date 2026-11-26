@@ -135,12 +135,20 @@ class MangaService:
                 overlap_y = min(yi + hi, yj + hj) - max(yi, yj)
                 overlap_w = min(wi, wj)
                 overlap_h = min(hi, hj)
-                # 竖排：同一列的左右相邻框，横向几乎贴住且纵向大半重叠
+                # 竖排：同一列的左右相邻框，横向贴近且纵向大半重叠（仅合并竖条框）
                 columns = (
-                    gap_x <= 0.30 * overlap_w and overlap_y >= 0.65 * overlap_h
+                    hi >= wi
+                    and hj >= wj
+                    and gap_x <= 0.60 * overlap_w
+                    and overlap_y >= 0.65 * overlap_h
                 )
-                # 横排：同一行的上下相邻框，纵向几乎贴住且横向大半重叠
-                rows = gap_y <= 0.25 * overlap_h and overlap_x >= 0.65 * overlap_w
+                # 横排：同一行的上下相邻框，纵向几乎贴住且横向大半重叠（仅合并横条框，避免把上下相邻的竖排气泡误并）
+                rows = (
+                    wi > hi
+                    and wj > hj
+                    and gap_y <= 0.25 * overlap_h
+                    and overlap_x >= 0.65 * overlap_w
+                )
                 if columns or rows:
                     union(i, j)
 
@@ -484,22 +492,22 @@ class MangaService:
                                 if not overlapped:
                                     extra.append(bubble)
                                     continue
-                                if all(
-                                    b_area > 1.35 * (own["rect"][2] * own["rect"][3])
+                                if (
+                                    len(overlapped) == 1
+                                    and b_area > 1.35 * (overlapped[0][1]["rect"][2] * overlapped[0][1]["rect"][3])
                                     and max(
                                         0,
-                                        min(bx + bw, own["rect"][0] + own["rect"][2])
-                                        - max(bx, own["rect"][0]),
+                                        min(bx + bw, overlapped[0][1]["rect"][0] + overlapped[0][1]["rect"][2])
+                                        - max(bx, overlapped[0][1]["rect"][0]),
                                     )
                                     * max(
                                         0,
-                                        min(by + bh, own["rect"][1] + own["rect"][3])
-                                        - max(by, own["rect"][1]),
+                                        min(by + bh, overlapped[0][1]["rect"][1] + overlapped[0][1]["rect"][3])
+                                        - max(by, overlapped[0][1]["rect"][1]),
                                     )
-                                    >= 0.70 * (own["rect"][2] * own["rect"][3])
-                                    for _, own in overlapped
+                                    >= 0.70 * (overlapped[0][1]["rect"][2] * overlapped[0][1]["rect"][3])
                                 ):
-                                    replaced_own.update(idx for idx, _ in overlapped)
+                                    replaced_own.add(overlapped[0][0])
                                     extra.append(bubble)
                             if extra or replaced_own:
                                 kept_own = [
