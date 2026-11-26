@@ -696,3 +696,45 @@ def test_detect_marks_tall_japanese_bubbles_vertical(workspace, monkeypatch):
     assert wide["style"]["vertical"] is False
     assert tiny["ocr_rect"]["width"] == 18
     assert tiny["layout_rect"]["width"] >= 32
+
+
+def test_legacy_detector_merges_overlapping_columns_and_recovers_sparse_pages(
+    workspace, monkeypatch
+):
+    store, doc = workspace
+    doc.pages[0].regions = []
+    doc.settings.detector = "legacy-balloon-yolov4"
+    doc = store.save(doc, doc.revision)
+    service = StubService(store, StubModels())
+
+    # 1) 4 overlapping column boxes in two dialogue groups -> merged into 2 bubbles
+    def compute_overlapping(context, **kw):
+        if kw["model_id"] == "legacy-balloon-yolov4":
+            return [
+                {"class_id": 1, "score": 0.85, "rect": [180, 40, 45, 95]},
+                {"class_id": 1, "score": 0.80, "rect": [150, 50, 42, 82]},
+                {"class_id": 1, "score": 0.88, "rect": [130, 190, 48, 120]},
+                {"class_id": 1, "score": 0.84, "rect": [92, 175, 48, 135]},
+            ]
+        return []
+
+    monkeypatch.setattr(service, "compute", compute_overlapping)
+    result = service.run(
+        doc.id, "detect", page_ids=[doc.pages[0].id], options={"replace_regions": True}
+    )
+    assert len(result["workspace"]["pages"][0]["regions"]) == 2
+
+    # 2) Sparse legacy detection (1 tiny edge box) -> falls back to recover missed bubble
+    def compute_sparse(context, **kw):
+        if kw["model_id"] == "legacy-balloon-yolov4":
+            return [{"class_id": 1, "score": 0.70, "rect": [20, 260, 24, 30]}]
+        return [
+            {"class_id": 1, "score": 0.90, "rect": [360, 40, 120, 220]},
+        ]
+
+    monkeypatch.setattr(service, "compute", compute_sparse)
+    result2 = service.run(
+        doc.id, "detect", page_ids=[doc.pages[0].id], options={"replace_regions": True}
+    )
+    assert len(result2["workspace"]["pages"][0]["regions"]) == 2
+    assert len(result2["report"]["fallback_pages"]) == 1

@@ -481,8 +481,13 @@ class MangaService:
                             # 用户直接选了行级模型：它报的是逐列小框，必须聚合，
                             # 否则一个气泡被切成几段分别翻译，译文互不相干。
                             results = own_panels + self.merge_into_bubbles(own_text)
-                        elif detector != LEGACY_BALLOON_ID:
-                            # 整框级模型（japanese-manga / speech-bubble…）
+                        else:
+                            if detector == LEGACY_BALLOON_ID:
+                                # ImageTrans Legacy 在部分页上会输出重叠的逐列框（如 1/2、3/4），
+                                # 需要先做一次同气泡聚合，再判断是否漏检。
+                                own_text = self.merge_into_bubbles(own_text)
+                                results = own_panels + own_text
+                            # 整框级模型（japanese-manga / speech-bubble / Legacy…）
                             # 有时只报一两个小横条或干脆漏检。只有「明显偏少」
                             # 才补一次行级检测，按 IoU 去重后与自身结果合并。
                             covered = sum(
@@ -491,7 +496,12 @@ class MangaService:
                             sparse = len(own_text) < 2 or covered < (
                                 0.015 * page.width * page.height
                             )
-                            if detector in self.LAYOUT_MODELS:
+                            if detector == LEGACY_BALLOON_ID:
+                                sparse = not own_text or (
+                                    len(own_text) < 2
+                                    and covered < 0.015 * page.width * page.height
+                                )
+                            elif detector in self.LAYOUT_MODELS:
                                 # A page with only one line of dialogue is valid.
                                 # Avoid mixing another detector into a layout result.
                                 sparse = not own_text
@@ -511,7 +521,9 @@ class MangaService:
                                     results = own_panels + own_text + extra
                                     supplemented = True
                         if detector not in self.PANEL_ONLY_MODELS and (
-                            supplemented or detector in self.LINE_LEVEL_MODELS
+                            supplemented
+                            or detector in self.LINE_LEVEL_MODELS
+                            or detector == LEGACY_BALLOON_ID
                         ):
                             # Merging lines or adding fallback boxes can create
                             # new containment after the initial detector pass.
