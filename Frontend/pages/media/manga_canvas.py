@@ -244,7 +244,10 @@ class MangaCanvas(QGraphicsView):
             pixmap.loadFromData(data)
             self.pixmap_item.setPixmap(pixmap)
             self.display_data = data
-        self.setSceneRect(0, 0, page["width"], page["height"])
+        pm = self.pixmap_item.pixmap() if not sip.isdeleted(self.pixmap_item) else QPixmap()
+        scene_w = pm.width() if pm.width() > 0 else page["width"]
+        scene_h = pm.height() if pm.height() > 0 else page["height"]
+        self.setSceneRect(0, 0, scene_w, scene_h)
         existing = {
             i.region["id"]: i for i in self.scene().items() if isinstance(i, RegionItem)
         }

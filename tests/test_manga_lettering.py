@@ -102,12 +102,18 @@ def test_vertical_column_never_starts_with_punctuation():
 
 
 def test_narrow_tall_bubble_stays_readable():
-    r = Region(
-        layout_rect=Rect(x=0, y=0, width=28, height=135),
-        target="钓到了~！",
-    )
-    r.style.vertical = True
-    r.style.autofit = True
-    _, info = render_text(r.model_dump())
-    assert info["font_size"] >= 16
-    assert not info["overflow"]
+    for width, height, text in [
+        (28, 135, "钓到了~！"),
+        (32, 75, "哇—"),
+        (32, 50, "诶？"),
+    ]:
+        r = Region(
+            layout_rect=Rect(x=0, y=0, width=width, height=height),
+            target=text,
+        )
+        r.style.vertical = True
+        r.style.auto_punctuation = True
+        r.style.autofit = True
+        _, info = render_text(r.model_dump())
+        assert info["font_size"] >= 16, (text, info)
+        assert not info["overflow"]

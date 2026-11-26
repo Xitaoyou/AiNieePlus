@@ -1244,3 +1244,30 @@ def test_region_provider_cache_switch_and_retranslate():
     assert editor.region()["translation_cache"] == {}
 
     dispose_editor(editor)
+
+
+def test_selecting_region_preserves_source_and_compare_views():
+    from PyQt5.QtCore import QBuffer, QIODevice, Qt
+    from PyQt5.QtGui import QImage
+
+    editor = make_editor_for_actions()
+    editor.variant.blockSignals(True)
+    editor.variant.setCurrentIndex(editor.variant.findData("source"))
+    editor.variant.blockSignals(False)
+    region_id = editor.page()["regions"][0]["id"]
+    editor.select_region(region_id)
+    assert editor.variant.currentData() == "source"
+
+    image = QImage(640, 800, QImage.Format_RGB32)
+    image.fill(Qt.white)
+    buf = QBuffer()
+    buf.open(QIODevice.WriteOnly)
+    image.save(buf, "PNG")
+    raw = bytes(buf.data())
+    from Frontend.pages.media.manga_page import compose_compare
+
+    compared = compose_compare(raw, raw)
+    editor.canvas.display(compared, editor.page(), fit=True)
+    assert editor.canvas.sceneRect().width() == 1280
+
+    dispose_editor(editor)

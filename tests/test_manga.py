@@ -682,6 +682,7 @@ def test_detect_marks_tall_japanese_bubbles_vertical(workspace, monkeypatch):
             return [
                 {"rect": [10, 10, 28, 130], "score": 0.9, "class_id": 1},
                 {"rect": [60, 10, 140, 40], "score": 0.9, "class_id": 1},
+                {"rect": [220, 10, 18, 50], "score": 0.9, "class_id": 1},
             ]
         raise AssertionError(kw)
 
@@ -690,5 +691,8 @@ def test_detect_marks_tall_japanese_bubbles_vertical(workspace, monkeypatch):
     regions = result["workspace"]["pages"][0]["regions"]
     tall = next(r for r in regions if r["ocr_rect"]["width"] == 28)
     wide = next(r for r in regions if r["ocr_rect"]["width"] == 140)
+    tiny = next(r for r in regions if r["ocr_rect"]["width"] == 18)
     assert tall["style"]["vertical"] is True
     assert wide["style"]["vertical"] is False
+    assert tiny["ocr_rect"]["width"] == 18
+    assert tiny["layout_rect"]["width"] >= 32

@@ -137,8 +137,21 @@ def render_text(
         )
         glyphs = {c for paragraph in text.split("\n") for c in tokens(paragraph)}
         boxes = {c: font.getbbox(c, stroke_width=stroke) for c in glyphs}
-        cell_w = max([size] + [b[2] - b[0] for b in boxes.values()])
-        cell_h = max([size] + [b[3] - b[1] for b in boxes.values()])
+        rotated_tokens = {"...", "—", "―", "ー", "─", "-"}
+        cell_w = max(
+            [size]
+            + [
+                (b[3] - b[1] if (vertical and style.get("auto_punctuation") and c in rotated_tokens) else b[2] - b[0])
+                for c, b in boxes.items()
+            ]
+        )
+        cell_h = max(
+            [size]
+            + [
+                (b[2] - b[0] if (vertical and style.get("auto_punctuation") and c in rotated_tokens) else b[3] - b[1])
+                for c, b in boxes.items()
+            ]
+        )
         advances = {c: max(1, font.getlength(c) + spacing) for c in boxes}
         lines = []
         limit = max(1, int(available_h // max(1, cell_h + spacing)))

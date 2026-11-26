@@ -3109,7 +3109,9 @@ class MangaPage(QWidget):
             self.run("render", scope=0)
             return
         if self.variant.currentData() == "compare":
-            self.status.setText("前后对比：左侧原图，右侧成品；成品尚未生成时显示原图")
+            self.image_data = None
+            self._zoom_percent = 0
+            self.status.setText("前后对比：左侧原图，右侧译后效果")
         self.load_image()
 
     def resizeEvent(self, event):
@@ -4330,7 +4332,9 @@ class MangaPage(QWidget):
             (self.charspace, "char_spacing"),
             (self.stroke, "stroke_width"),
         ]:
+            widget.blockSignals(True)
             widget.setValue(s[key])
+            widget.blockSignals(False)
         for widget, value in (
             (self.vertical_button, s["vertical"]),
             (self.bold_button, s["bold"]),
@@ -4482,13 +4486,46 @@ class MangaPage(QWidget):
                 else self.client.asset(doc, page, "source")
             )
             if variant == "compare":
-                # 前后对比：左原图、右成品，一次请求拿两张拼好再交给画布，
-                # 避免在 GUI 线程里再跑一遍 PIL 合图。
+                # 前后对比：左原图、右成品，一次请求拿两张拼好再交给画布；
+                # 若尚未生成成品图，则用实时去字+排版合成右侧预览。
                 response = self.client.backend.http.get(
                     f"/api/v2/manga/{doc}/pages/{page}/render", timeout=60
                 )
                 if response.status_code == 404:
-                    return original, True, original
+                    from io import BytesIO
+
+                    from PIL import Image
+
+                    from Shared.manga_lettering import render_text
+
+                    preview_bytes = (
+                        self.fill_preview(original)
+                        if self.document["settings"].get("removal") == "fill"
+                        else original
+                    )
+                    image = Image.open(BytesIO(preview_bytes)).convert("RGBA")
+                    for r in (self.page() or {}).get("regions", []):
+                        if r.get("target"):
+                            tile, _ = render_text(
+                                r,
+                                punctuation_rules=self.document["settings"].get(
+                                    "punctuation_rules"
+                                ),
+                            )
+                            image.alpha_composite(
+                                tile,
+                                (
+                                    round(r["layout_rect"]["x"]),
+                                    round(r["layout_rect"]["y"]),
+                                ),
+                            )
+                    buf = BytesIO()
+                    image.convert("RGB").save(buf, "PNG")
+                    return (
+                        compose_compare(original, buf.getvalue()),
+                        False,
+                        original,
+                    )
                 response.raise_for_status()
                 return (
                     compose_compare(original, response.content),

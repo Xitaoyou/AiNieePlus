@@ -595,6 +595,7 @@ class MangaService:
                             if min(w, h) <= 0:
                                 continue
                             rect = Rect(x=x, y=y, width=w, height=h)
+                            layout_rect = rect.model_copy()
                             style = (
                                 page.default_style
                                 or document.settings.default_style
@@ -608,10 +609,24 @@ class MangaService:
                                 and h >= w * 1.35
                             ):
                                 style.vertical = True
+                            # 极窄的单行/单列气泡（如「哇—」「诶？」），检测框往往紧贴笔画，
+                            # 适当放宽排版框（不动取字框与去字框），避免自动字号被压到 6~10px。
+                            if style.vertical and w < 32 and page.width >= 32:
+                                new_w = min(float(page.width), max(w * 1.5, 32.0))
+                                new_x = max(0.0, min(float(page.width) - new_w, x - (new_w - w) / 2))
+                                layout_rect = Rect(
+                                    x=new_x, y=y, width=new_w, height=h
+                                )
+                            elif not style.vertical and h < 32 and page.height >= 32:
+                                new_h = min(float(page.height), max(h * 1.5, 32.0))
+                                new_y = max(0.0, min(float(page.height) - new_h, y - (new_h - h) / 2))
+                                layout_rect = Rect(
+                                    x=x, y=new_y, width=w, height=new_h
+                                )
                             region = Region(
                                 ocr_rect=rect.model_copy(),
                                 erase_rect=rect.model_copy(),
-                                layout_rect=rect.model_copy(),
+                                layout_rect=layout_rect,
                                 confidence=detected["score"],
                                 removal=document.settings.removal,
                                 style=style,
