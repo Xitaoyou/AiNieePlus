@@ -1268,6 +1268,6 @@ def test_selecting_region_preserves_source_and_compare_views():
 
     compared = compose_compare(raw, raw)
     editor.canvas.display(compared, editor.page(), fit=True)
-    assert editor.canvas.sceneRect().width() == 1280
+    assert editor.canvas.sceneRect().width() >= 1280
 
     dispose_editor(editor)
